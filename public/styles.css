@@ -448,6 +448,33 @@ body::before {
   overflow-wrap: anywhere;
 }
 
+.log-line__content {
+  display: grid;
+  gap: 4px;
+}
+
+.log-line__toggle {
+  justify-self: start;
+  border: 1px solid rgba(168, 181, 223, 0.28);
+  background: rgba(143, 155, 196, 0.12);
+  color: rgba(218, 226, 255, 0.96);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.log-line__toggle:hover {
+  background: rgba(143, 155, 196, 0.2);
+  border-color: rgba(168, 181, 223, 0.38);
+}
+
+.log-line__toggle:focus-visible {
+  outline: 2px solid rgba(124, 243, 227, 0.42);
+  outline-offset: 2px;
+}
+
 .log-line--tool-call {
   background: rgba(59, 130, 246, 0.08);
 }

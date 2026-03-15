@@ -8,6 +8,7 @@ const { URL } = require("url");
 const PORT = 17788;
 const PUBLIC_DIR = path.join(__dirname, "public");
 const OPENCLAW_DIR = path.join(os.homedir(), ".openclaw");
+const AGENTS_DIR = path.join(OPENCLAW_DIR, "agents");
 const CONFIG_PATH = path.join(OPENCLAW_DIR, "openclaw.json");
 const LOG_PATHS = {
   gateway: path.join(OPENCLAW_DIR, "logs", "gateway.log"),
@@ -65,6 +66,270 @@ async function readTail(filePath, maxBytes = 512 * 1024) {
   } catch (error) {
     return "";
   }
+}
+
+function normalizeText(value) {
+  if (value == null) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function toIsoTimestamp(value) {
+  if (value == null) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function collectContentText(content, options = {}) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const includeThinking = Boolean(options.includeThinking);
+  const parts = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      parts.push(item);
+      continue;
+    }
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    if (!includeThinking && item.type === "thinking") {
+      continue;
+    }
+    if (item.type === "text" && typeof item.text === "string") {
+      parts.push(item.text);
+      continue;
+    }
+    if (item.type === "toolCall") {
+      const command = typeof item.arguments?.command === "string"
+        ? ` ${item.arguments.command}`
+        : "";
+      parts.push(`toolCall ${item.name ?? "tool"}${command}`);
+      continue;
+    }
+    if (typeof item.text === "string") {
+      parts.push(item.text);
+    }
+  }
+  return parts.join(" | ");
+}
+
+function summarizeSessionRecord(record) {
+  const message = record?.message ?? {};
+  const role = message.role ?? record?.type ?? "event";
+  if (role === "toolResult") {
+    const toolName = message.toolName ?? "tool";
+    const detail = message.details?.aggregated ?? collectContentText(message.content, { includeThinking: false });
+    return `toolResult ${toolName}: ${normalizeText(detail || "completed")}`;
+  }
+  if (role === "assistant") {
+    const detail = collectContentText(message.content, { includeThinking: false });
+    return `assistant: ${normalizeText(detail || "response")}`;
+  }
+  if (role === "user") {
+    const detail = collectContentText(message.content, { includeThinking: false });
+    return `user: ${normalizeText(detail || "message")}`;
+  }
+  const fallback = collectContentText(message.content, { includeThinking: false })
+    || message.text
+    || JSON.stringify(message);
+  return `${role}: ${normalizeText(fallback || "event")}`;
+}
+
+function formatSessionLogLine(rawLine, agentId) {
+  if (!rawLine) return null;
+  try {
+    const record = JSON.parse(rawLine);
+    const timestampIso = toIsoTimestamp(record.timestamp ?? record.message?.timestamp ?? null);
+    const summary = summarizeSessionRecord(record);
+    const decorated = `[${agentId}] ${summary}`;
+    return timestampIso
+      ? `${timestampIso} ${redactSecrets(decorated)}`
+      : redactSecrets(decorated);
+  } catch (error) {
+    const fallback = `[${agentId}] raw: ${normalizeText(rawLine)}`;
+    return redactSecrets(fallback);
+  }
+}
+
+function resolveSessionFile(sessionFile, sessionsDir) {
+  if (typeof sessionFile !== "string" || !sessionFile) {
+    return null;
+  }
+  const candidate = path.isAbsolute(sessionFile)
+    ? sessionFile
+    : path.join(sessionsDir, sessionFile);
+  return safeStat(candidate)?.isFile() ? candidate : null;
+}
+
+function resolveSessionFileFromId(sessionId, sessionsDir) {
+  if (typeof sessionId !== "string" || !sessionId) {
+    return null;
+  }
+  const candidate = path.join(sessionsDir, `${sessionId}.jsonl`);
+  return safeStat(candidate)?.isFile() ? candidate : null;
+}
+
+function normalizeUpdatedAtMs(updatedAt, fallbackFilePath = null) {
+  if (typeof updatedAt === "number" && Number.isFinite(updatedAt)) {
+    return updatedAt;
+  }
+  if (typeof updatedAt === "string") {
+    const parsed = Date.parse(updatedAt);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  if (fallbackFilePath) {
+    const stat = safeStat(fallbackFilePath);
+    if (stat?.mtimeMs) {
+      return stat.mtimeMs;
+    }
+  }
+  return null;
+}
+
+function pickSessionFileFromIndex(indexData, sessionsDir) {
+  if (!indexData || typeof indexData !== "object") {
+    return null;
+  }
+  let best = null;
+  for (const item of Object.values(indexData)) {
+    const sessionFile = resolveSessionFile(item?.sessionFile, sessionsDir)
+      ?? resolveSessionFileFromId(item?.sessionId, sessionsDir);
+    if (!sessionFile) {
+      continue;
+    }
+    const rank = normalizeUpdatedAtMs(item?.updatedAt, sessionFile) ?? 0;
+    if (!best || rank > best.rank) {
+      best = { sessionFile, rank };
+    }
+  }
+  return best?.sessionFile ?? null;
+}
+
+function pickLatestSessionFileFromDir(sessionsDir) {
+  try {
+    const candidates = fs.readdirSync(sessionsDir)
+      .filter((name) => name.endsWith(".jsonl"))
+      .map((name) => {
+        const filePath = path.join(sessionsDir, name);
+        const stat = safeStat(filePath);
+        return stat?.isFile() ? { filePath, mtimeMs: stat.mtimeMs } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return candidates[0]?.filePath ?? null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function resolveAgentSessionFile(agentId) {
+  const sessionsDir = path.join(AGENTS_DIR, agentId, "sessions");
+  const indexPath = path.join(sessionsDir, "sessions.json");
+  const indexData = safeReadJson(indexPath);
+  return pickSessionFileFromIndex(indexData, sessionsDir)
+    ?? pickLatestSessionFileFromDir(sessionsDir);
+}
+
+function readLatestAgentSessionEventAt(agentId) {
+  const sessionsDir = path.join(AGENTS_DIR, agentId, "sessions");
+  const indexPath = path.join(sessionsDir, "sessions.json");
+  const indexData = safeReadJson(indexPath);
+  let bestMs = null;
+
+  if (indexData && typeof indexData === "object") {
+    for (const item of Object.values(indexData)) {
+      const sessionFile = resolveSessionFile(item?.sessionFile, sessionsDir)
+        ?? resolveSessionFileFromId(item?.sessionId, sessionsDir);
+      const updatedAtMs = normalizeUpdatedAtMs(item?.updatedAt, sessionFile);
+      if (updatedAtMs == null) {
+        continue;
+      }
+      if (bestMs == null || updatedAtMs > bestMs) {
+        bestMs = updatedAtMs;
+      }
+    }
+  }
+
+  if (bestMs == null) {
+    const latestFile = pickLatestSessionFileFromDir(sessionsDir);
+    if (latestFile) {
+      bestMs = normalizeUpdatedAtMs(null, latestFile);
+    }
+  }
+
+  if (bestMs == null) {
+    return null;
+  }
+  const date = new Date(bestMs);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function buildSessionStatusByAgent(config) {
+  const statusByAgent = {};
+  for (const agentId of listAgentIds(config)) {
+    const lastEventAt = readLatestAgentSessionEventAt(agentId);
+    statusByAgent[agentId] = {
+      lastEventAt,
+      state: classifyFreshness(lastEventAt),
+    };
+  }
+  return statusByAgent;
+}
+
+function listAgentIds(config) {
+  const fromConfig = (config?.agents?.list ?? [])
+    .map((agent) => agent?.id)
+    .filter(Boolean);
+  try {
+    const fromDirs = fs.readdirSync(AGENTS_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    return Array.from(new Set([...fromConfig, ...fromDirs]));
+  } catch (error) {
+    return Array.from(new Set(fromConfig));
+  }
+}
+
+async function readAgentSessionLogs(config, maxLines = 350) {
+  const agentIds = listAgentIds(config);
+  const bucket = [];
+  const sessionFiles = [];
+  const perAgentLines = Math.max(80, Math.ceil((maxLines * 2) / Math.max(agentIds.length, 1)));
+
+  for (const agentId of agentIds) {
+    const sessionFile = resolveAgentSessionFile(agentId);
+    if (!sessionFile) {
+      continue;
+    }
+    sessionFiles.push(sessionFile);
+    const tail = await readTail(sessionFile, 384 * 1024);
+    const rawLines = tail.split(/\r?\n/).filter(Boolean).slice(-perAgentLines);
+    for (const rawLine of rawLines) {
+      const line = formatSessionLogLine(rawLine, agentId);
+      if (!line) {
+        continue;
+      }
+      const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[^ ]+)/);
+      const tsMs = tsMatch ? Date.parse(tsMatch[1]) : Number.NaN;
+      bucket.push({
+        line,
+        tsMs: Number.isNaN(tsMs) ? 0 : tsMs,
+      });
+    }
+  }
+
+  bucket.sort((a, b) => a.tsMs - b.tsMs);
+  return {
+    sessionFiles,
+    lines: bucket.map((item) => item.line).slice(-maxLines),
+  };
 }
 
 function parseLogLines(text) {
@@ -147,7 +412,7 @@ function summarizeBindings(bindings, logLines) {
   return statusByBinding;
 }
 
-function buildAgentStatus(config, logLines) {
+function buildAgentStatus(config, logLines, sessionStatusByAgent = {}) {
   const agents = config?.agents?.list ?? [];
   const bindings = config?.bindings ?? [];
   const defaults = config?.agents?.defaults ?? {};
@@ -179,7 +444,8 @@ function buildAgentStatus(config, logLines) {
       .filter((status) => Boolean(status?.lastEventAt))
       .sort((a, b) => Date.parse(b.lastEventAt) - Date.parse(a.lastEventAt))[0];
 
-    const lastEventAt = mostRecent?.lastEventAt ?? null;
+    const sessionStatus = sessionStatusByAgent[agent.id] ?? {};
+    const lastEventAt = sessionStatus.lastEventAt ?? mostRecent?.lastEventAt ?? null;
     return {
       id: agent.id,
       default: Boolean(agent.default),
@@ -188,7 +454,8 @@ function buildAgentStatus(config, logLines) {
       mentionPatterns: agent.groupChat?.mentionPatterns ?? [],
       bindings: agentBindings,
       lastEventAt,
-      state: classifyFreshness(lastEventAt),
+      state: sessionStatus.state ?? classifyFreshness(lastEventAt),
+      stateSource: sessionStatus.lastEventAt ? "session" : "gateway",
     };
   });
 }
@@ -288,13 +555,29 @@ function createRequestHandler() {
       const config = safeReadJson(CONFIG_PATH);
       const logTail = await readTail(LOG_PATHS.gateway);
       const logLines = parseLogLines(logTail);
-      sendJson(res, 200, { agents: buildAgentStatus(config, logLines) });
+      const sessionStatusByAgent = buildSessionStatusByAgent(config);
+      sendJson(res, 200, { agents: buildAgentStatus(config, logLines, sessionStatusByAgent) });
       return;
     }
 
     if (requestUrl.pathname === "/api/logs") {
       const type = requestUrl.searchParams.get("type") ?? "gateway";
-      const lines = Number(requestUrl.searchParams.get("lines") ?? 200);
+      const requestedLines = Number(requestUrl.searchParams.get("lines") ?? 200);
+      const lines = Number.isFinite(requestedLines)
+        ? Math.min(Math.max(Math.trunc(requestedLines), 1), 1200)
+        : 200;
+      if (type === "session") {
+        const config = safeReadJson(CONFIG_PATH);
+        const sessionData = await readAgentSessionLogs(config, lines);
+        sendJson(res, 200, {
+          type,
+          path: "~/.openclaw/agents/*/sessions/*.jsonl",
+          sessionFiles: sessionData.sessionFiles,
+          totalLines: sessionData.lines.length,
+          lines: sessionData.lines,
+        });
+        return;
+      }
       const pathChoice = type === "gatewayError" ? LOG_PATHS.gatewayError : LOG_PATHS.gateway;
       const text = await readTail(pathChoice, 1024 * 1024);
       const tailLines = text
