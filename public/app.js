@@ -86,7 +86,7 @@ const statusLabels = {
 const REALTIME_LOG_PREVIEW_CHARS = 220;
 const LOG_STREAM_PREVIEW_CHARS = 320;
 const SCHEDULE_PREVIEW_CHARS = 260;
-const MONACO_VS_BASE_URL = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs";
+const MONACO_VS_BASE_URL = "/vendor/monaco/vs";
 
 let monacoLoadPromise = null;
 
