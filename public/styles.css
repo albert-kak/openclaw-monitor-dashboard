@@ -200,6 +200,11 @@ body::before {
   gap: 22px;
 }
 
+#config.panel--active {
+  display: grid;
+  gap: 22px;
+}
+
 .panel__header h2 {
   margin: 0 0 6px;
 }
@@ -270,6 +275,14 @@ body::before {
 }
 
 #overview .module {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+#config .module {
   background: transparent;
   border: none;
   border-radius: 0;
@@ -857,6 +870,180 @@ body::before {
   gap: 16px;
 }
 
+.schedule-list,
+.skill-list {
+  display: grid;
+  gap: 14px;
+}
+
+.skill-section {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skill-section__header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.skill-section__list {
+  display: grid;
+  gap: 12px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.schedule-card,
+.skill-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: var(--card-shadow);
+  display: grid;
+  gap: 10px;
+}
+
+.schedule-card__header,
+.skill-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.schedule-card__header h3,
+.skill-card__header h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.schedule-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(168, 181, 223, 0.3);
+  background: rgba(143, 155, 196, 0.12);
+  color: rgba(232, 236, 255, 0.95);
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pill--on {
+  border-color: rgba(45, 212, 191, 0.42);
+  background: rgba(45, 212, 191, 0.18);
+  color: #7cf3e3;
+}
+
+.pill--off {
+  border-color: rgba(249, 115, 22, 0.45);
+  background: rgba(249, 115, 22, 0.16);
+  color: #fdba74;
+}
+
+.schedule-status {
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid rgba(168, 181, 223, 0.3);
+  background: rgba(148, 163, 184, 0.14);
+  color: rgba(226, 232, 255, 0.95);
+}
+
+.schedule-status--ok {
+  border-color: rgba(45, 212, 191, 0.5);
+  background: rgba(45, 212, 191, 0.17);
+  color: #7cf3e3;
+}
+
+.schedule-status--error {
+  border-color: rgba(239, 68, 68, 0.52);
+  background: rgba(239, 68, 68, 0.16);
+  color: #fca5a5;
+}
+
+.schedule-status--running {
+  border-color: rgba(59, 130, 246, 0.52);
+  background: rgba(59, 130, 246, 0.16);
+  color: #93c5fd;
+}
+
+.schedule-card__line,
+.skill-card__line {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.schedule-card__line strong,
+.skill-card__line strong {
+  color: var(--ink);
+}
+
+.schedule-card__line--error {
+  color: #fda4a4;
+}
+
+.schedule-card__line--preview {
+  display: grid;
+  gap: 6px;
+}
+
+.schedule-card__preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.schedule-card__toggle {
+  justify-self: start;
+  border: 1px solid rgba(168, 181, 223, 0.28);
+  background: rgba(143, 155, 196, 0.12);
+  color: rgba(218, 226, 255, 0.96);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.schedule-card__toggle:hover {
+  background: rgba(143, 155, 196, 0.2);
+  border-color: rgba(168, 181, 223, 0.38);
+}
+
+.schedule-card__toggle:focus-visible {
+  outline: 2px solid rgba(124, 243, 227, 0.42);
+  outline-offset: 2px;
+}
+
+.skill-card__badges {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.skill-card__desc {
+  font-size: 14px;
+  color: rgba(232, 236, 255, 0.9);
+}
+
 .agent-row {
   background: var(--card);
   border: 1px solid var(--border);
@@ -893,11 +1080,20 @@ body::before {
 .log-controls {
   display: flex;
   gap: 12px;
-  margin-bottom: 12px;
   flex-wrap: wrap;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px;
+  margin: -12px -12px 12px;
+  background: linear-gradient(180deg, rgba(10, 14, 28, 0.98), rgba(10, 14, 28, 0.86));
+  backdrop-filter: blur(5px);
+  border-bottom: 1px solid rgba(168, 181, 223, 0.16);
 }
 
 select,
+input[type="search"],
 .btn {
   border-radius: 12px;
   border: 1px solid rgba(168, 181, 223, 0.18);
@@ -908,9 +1104,185 @@ select,
   color: var(--ink);
 }
 
+input[type="search"] {
+  min-width: 220px;
+  flex: 1 1 220px;
+}
+
 .btn {
   cursor: pointer;
   background: linear-gradient(135deg, rgba(45, 212, 191, 0.14), rgba(139, 92, 246, 0.14));
+}
+
+.btn--compact {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.btn--active {
+  border-color: rgba(45, 212, 191, 0.42);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.1);
+}
+
+.log-level-filters {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.log-stream {
+  background: radial-gradient(circle at 85% -20%, rgba(45, 212, 191, 0.12), transparent 45%), rgba(10, 14, 28, 0.86);
+  border: 1px solid rgba(168, 181, 223, 0.2);
+  border-radius: 18px;
+  padding: 12px;
+}
+
+.log-stream__stats {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 2px 10px;
+}
+
+.log-stream__viewport {
+  border-radius: 14px;
+  background: rgba(5, 8, 18, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  max-height: 460px;
+  overflow: auto;
+  padding: 12px 10px 12px 12px;
+  outline: none;
+}
+
+.log-stream__viewport:focus-visible {
+  box-shadow: 0 0 0 3px rgba(124, 243, 227, 0.18);
+}
+
+.log-stream__timeline {
+  display: grid;
+  gap: 8px;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.log-stream__empty {
+  color: var(--muted);
+  padding: 14px 10px;
+}
+
+.log-stream-line {
+  display: grid;
+  grid-template-columns: 74px 14px 1fr;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.log-stream-line__time {
+  color: rgba(157, 167, 212, 0.78);
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+  padding-top: 10px;
+  user-select: none;
+}
+
+.log-stream-line__axis {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.log-stream-line__axis::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, rgba(168, 181, 223, 0.22), rgba(168, 181, 223, 0.06));
+}
+
+.log-stream-line__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-top: 13px;
+  background: rgba(168, 181, 223, 0.72);
+  border: 2px solid rgba(10, 14, 28, 0.9);
+  z-index: 1;
+}
+
+.log-stream-line__card {
+  background: rgba(148, 163, 184, 0.06);
+  border: 1px solid rgba(168, 181, 223, 0.14);
+  border-radius: 12px;
+  padding: 9px 11px;
+  display: grid;
+  gap: 6px;
+}
+
+.log-stream-line__meta {
+  display: flex;
+}
+
+.log-stream-line__level {
+  display: inline-flex;
+  border-radius: 999px;
+  border: 1px solid rgba(168, 181, 223, 0.24);
+  padding: 1px 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: rgba(215, 225, 255, 0.9);
+}
+
+.log-stream-line__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.log-stream-line--error .log-stream-line__card {
+  background: rgba(239, 68, 68, 0.11);
+  border-color: rgba(248, 113, 113, 0.34);
+}
+
+.log-stream-line--error .log-stream-line__dot {
+  background: rgba(248, 113, 113, 0.95);
+}
+
+.log-stream-line--error .log-stream-line__level {
+  border-color: rgba(248, 113, 113, 0.42);
+  color: rgba(254, 226, 226, 0.96);
+}
+
+.log-stream-line--warn .log-stream-line__card {
+  background: rgba(249, 115, 22, 0.1);
+  border-color: rgba(251, 146, 60, 0.3);
+}
+
+.log-stream-line--warn .log-stream-line__dot {
+  background: rgba(251, 146, 60, 0.92);
+}
+
+.log-stream-line--warn .log-stream-line__level {
+  border-color: rgba(251, 146, 60, 0.36);
+  color: rgba(255, 237, 213, 0.95);
+}
+
+.log-stream-line--info .log-stream-line__card {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: rgba(52, 211, 153, 0.26);
+}
+
+.log-stream-line--info .log-stream-line__dot {
+  background: rgba(45, 212, 191, 0.92);
+}
+
+.log-stream-line--debug .log-stream-line__card {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.log-stream-line--debug .log-stream-line__dot {
+  background: rgba(96, 165, 250, 0.9);
 }
 
 .log-box,
@@ -925,6 +1297,165 @@ select,
   font-size: 12px;
   line-height: 1.5;
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.code-box--compact {
+  max-height: 220px;
+}
+
+.code-box--compact:empty {
+  display: none;
+}
+
+.code-editor {
+  width: 100%;
+  min-height: 420px;
+  background: #12110f;
+  color: #f8f3ed;
+  border-radius: 18px;
+  padding: 16px;
+  overflow: auto;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  resize: vertical;
+  outline: none;
+}
+
+.code-editor:focus {
+  border-color: rgba(45, 212, 191, 0.38);
+  box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.10);
+}
+
+.CodeMirror {
+  height: 420px;
+  border-radius: 18px;
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: #12110f;
+}
+
+.CodeMirror-foldgutter {
+  width: 0.85em;
+}
+
+.CodeMirror-foldmarker {
+  color: rgba(125, 211, 252, 0.92);
+  text-shadow: none;
+}
+
+.CodeMirror-lint-marker-error,
+.CodeMirror-lint-marker-warning {
+  transform: scale(0.9);
+  opacity: 0.95;
+}
+
+.CodeMirror-focused {
+  border-color: rgba(45, 212, 191, 0.38);
+  box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.10);
+}
+
+.CodeMirror-gutters {
+  background: rgba(0, 0, 0, 0.25);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.CodeMirror-linenumber {
+  color: rgba(248, 243, 237, 0.45);
+}
+
+.CodeMirror-activeline-background {
+  background: rgba(45, 212, 191, 0.06);
+}
+
+.CodeMirror-dialog {
+  background: rgba(10, 14, 28, 0.96);
+  border: 1px solid rgba(168, 181, 223, 0.18);
+  color: var(--ink);
+}
+
+.CodeMirror-dialog input {
+  background: rgba(10, 14, 28, 0.90);
+  border: 1px solid rgba(168, 181, 223, 0.24);
+  color: var(--ink);
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+
+.config-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.config-path {
+  font-size: 13px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.config-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-editor-status {
+  margin-top: 8px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: rgba(157, 167, 212, 0.92);
+}
+
+.config-json-status {
+  font-weight: 700;
+}
+
+.config-json-status--valid {
+  color: rgba(45, 212, 191, 0.95);
+}
+
+.config-json-status--invalid {
+  color: rgba(251, 113, 133, 0.95);
+}
+
+.inline-message {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 18px;
+}
+
+.inline-message--success {
+  color: rgba(45, 212, 191, 0.95);
+}
+
+.inline-message--warn {
+  color: rgba(251, 191, 36, 0.95);
+}
+
+.inline-message--error {
+  color: rgba(251, 113, 133, 0.95);
+}
+
+.btn--danger {
+  background: linear-gradient(135deg, rgba(251, 113, 133, 0.18), rgba(239, 68, 68, 0.16));
+  border-color: rgba(251, 113, 133, 0.30);
+}
+
+.btn:disabled,
+select:disabled,
+input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .footer {
@@ -1061,5 +1592,52 @@ select,
     width: 2px;
     height: 2px;
     transform: translateX(-50%);
+  }
+
+  .schedule-card__header,
+  .skill-card__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .log-controls {
+    position: static;
+    margin: 0 0 10px;
+    padding: 0;
+    background: transparent;
+    border-bottom: none;
+  }
+
+  .log-stream__viewport {
+    max-height: 380px;
+    padding: 10px;
+  }
+
+  .log-level-filters {
+    width: 100%;
+    order: 3;
+  }
+
+  .log-stream-line {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .log-stream-line__time {
+    text-align: left;
+    padding-top: 0;
+  }
+
+  .log-stream-line__axis {
+    display: none;
+  }
+
+  .config-editor-status {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .skill-section__list {
+    max-height: 340px;
   }
 }
