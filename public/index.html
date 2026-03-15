@@ -32,13 +32,31 @@
 
     <main class="content">
       <section class="panel panel--active" id="overview" role="tabpanel">
-        <div class="grid stats-grid" id="summary-cards"></div>
-        <section class="module">
+        <section class="module module--agent" aria-label="Agent 状态">
           <div class="module__header">
-            <h2>Agent Status</h2>
+            <h2>Agent 状态</h2>
             <div class="module__meta" id="agent-meta"></div>
           </div>
-          <div class="grid agent-grid" id="agent-status"></div>
+          <div id="agent-status"></div>
+        </section>
+
+        <section class="module module--logs" aria-label="实时日志流">
+          <header class="realtime-logs__header">
+            <div class="realtime-logs__title">
+              <span class="realtime-logs__accent" aria-hidden="true"></span>
+              <h2>实时日志流</h2>
+            </div>
+            <div class="realtime-logs__meta" id="realtime-log-meta"></div>
+          </header>
+          <div
+            class="realtime-logs__filters"
+            id="realtime-log-filters"
+            role="toolbar"
+            aria-label="日志过滤"
+          ></div>
+          <div class="realtime-logs__viewport" id="realtime-log-viewport" tabindex="0">
+            <div class="realtime-logs__lines" id="realtime-log-lines" role="log" aria-live="polite"></div>
+          </div>
         </section>
       </section>
 
@@ -75,7 +93,7 @@
     </main>
 
     <footer class="footer">
-      Data source: <span>~/.openclaw</span> · Auto-refresh every 10 seconds
+      Data source: <span>~/.openclaw</span> · Auto-refresh every 3 seconds
     </footer>
 
     <script src="/app.js"></script>

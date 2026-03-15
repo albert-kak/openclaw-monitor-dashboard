@@ -10,6 +10,14 @@ node server.js
 
 Open `http://localhost:17788` in your browser.
 
+`server.js` now runs with hot reload by default. Changes in `server.js` and `public/` will auto-restart the server.
+
+To disable hot reload:
+
+```bash
+OPENCLAW_HOT_RELOAD=0 node server.js
+```
+
 ## Data Sources
 
 - `~/.openclaw/openclaw.json`

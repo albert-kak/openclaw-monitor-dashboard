@@ -2,6 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { fork } = require("child_process");
 const { URL } = require("url");
 
 const PORT = 17788;
@@ -12,6 +13,8 @@ const LOG_PATHS = {
   gateway: path.join(OPENCLAW_DIR, "logs", "gateway.log"),
   gatewayError: path.join(OPENCLAW_DIR, "logs", "gateway.err.log"),
 };
+const HOT_RELOAD_CHILD_ENV = "OPENCLAW_DASHBOARD_CHILD";
+const HOT_RELOAD_DISABLED = process.env.OPENCLAW_HOT_RELOAD === "0";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -264,68 +267,196 @@ function serveStatic(res, filePath) {
   });
 }
 
-const server = http.createServer(async (req, res) => {
-  if (!req.url) {
-    sendText(res, 400, "Bad request");
-    return;
-  }
+function createRequestHandler() {
+  return async (req, res) => {
+    if (!req.url) {
+      sendText(res, 400, "Bad request");
+      return;
+    }
 
-  const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    const requestUrl = new URL(req.url, `http://${req.headers.host}`);
 
-  if (requestUrl.pathname === "/api/summary") {
-    const config = safeReadJson(CONFIG_PATH);
-    const logTail = await readTail(LOG_PATHS.gateway);
-    const logLines = parseLogLines(logTail);
-    sendJson(res, 200, buildSummary(config, logLines));
-    return;
-  }
+    if (requestUrl.pathname === "/api/summary") {
+      const config = safeReadJson(CONFIG_PATH);
+      const logTail = await readTail(LOG_PATHS.gateway);
+      const logLines = parseLogLines(logTail);
+      sendJson(res, 200, buildSummary(config, logLines));
+      return;
+    }
 
-  if (requestUrl.pathname === "/api/agents") {
-    const config = safeReadJson(CONFIG_PATH);
-    const logTail = await readTail(LOG_PATHS.gateway);
-    const logLines = parseLogLines(logTail);
-    sendJson(res, 200, { agents: buildAgentStatus(config, logLines) });
-    return;
-  }
+    if (requestUrl.pathname === "/api/agents") {
+      const config = safeReadJson(CONFIG_PATH);
+      const logTail = await readTail(LOG_PATHS.gateway);
+      const logLines = parseLogLines(logTail);
+      sendJson(res, 200, { agents: buildAgentStatus(config, logLines) });
+      return;
+    }
 
-  if (requestUrl.pathname === "/api/logs") {
-    const type = requestUrl.searchParams.get("type") ?? "gateway";
-    const lines = Number(requestUrl.searchParams.get("lines") ?? 200);
-    const pathChoice = type === "gatewayError" ? LOG_PATHS.gatewayError : LOG_PATHS.gateway;
-    const text = await readTail(pathChoice, 1024 * 1024);
-    const tailLines = text
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .slice(-lines)
-      .map((line) => redactSecrets(line));
-    sendJson(res, 200, {
-      type,
-      path: pathChoice,
-      totalLines: tailLines.length,
-      lines: tailLines,
+    if (requestUrl.pathname === "/api/logs") {
+      const type = requestUrl.searchParams.get("type") ?? "gateway";
+      const lines = Number(requestUrl.searchParams.get("lines") ?? 200);
+      const pathChoice = type === "gatewayError" ? LOG_PATHS.gatewayError : LOG_PATHS.gateway;
+      const text = await readTail(pathChoice, 1024 * 1024);
+      const tailLines = text
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .slice(-lines)
+        .map((line) => redactSecrets(line));
+      sendJson(res, 200, {
+        type,
+        path: pathChoice,
+        totalLines: tailLines.length,
+        lines: tailLines,
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/config") {
+      const config = safeReadJson(CONFIG_PATH);
+      sendJson(res, 200, sanitizeConfig(config));
+      return;
+    }
+
+    let filePath = path.join(PUBLIC_DIR, requestUrl.pathname);
+    if (requestUrl.pathname === "/") {
+      filePath = path.join(PUBLIC_DIR, "index.html");
+    }
+
+    if (!filePath.startsWith(PUBLIC_DIR)) {
+      sendText(res, 403, "Forbidden");
+      return;
+    }
+
+    serveStatic(res, filePath);
+  };
+}
+
+function startDashboardServer() {
+  const server = http.createServer(createRequestHandler());
+  server.listen(PORT, () => {
+    console.log(`OpenClaw monitor dashboard running on http://localhost:${PORT}`);
+  });
+  return server;
+}
+
+function createDebouncedRestart(callback, delayMs) {
+  let timer = null;
+  return (reason) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      callback(reason);
+    }, delayMs);
+  };
+}
+
+function spawnServerWorker() {
+  const worker = fork(__filename, [], {
+    env: {
+      ...process.env,
+      [HOT_RELOAD_CHILD_ENV]: "1",
+    },
+    stdio: "inherit",
+  });
+  return worker;
+}
+
+function startHotReloadSupervisor() {
+  let worker = spawnServerWorker();
+  let shuttingDown = false;
+  let restarting = false;
+  let queuedRestart = false;
+  const watchers = [];
+
+  const restartWorker = (reason) => {
+    if (shuttingDown || !worker) {
+      return;
+    }
+    if (restarting) {
+      queuedRestart = true;
+      return;
+    }
+
+    restarting = true;
+    console.log(`[hot] change detected (${reason}), restarting server...`);
+    const previousWorker = worker;
+
+    previousWorker.once("exit", () => {
+      if (shuttingDown) {
+        return;
+      }
+      worker = spawnServerWorker();
+      restarting = false;
+      if (queuedRestart) {
+        queuedRestart = false;
+        restartWorker("queued-change");
+      }
     });
+
+    previousWorker.kill("SIGTERM");
+    setTimeout(() => {
+      if (previousWorker.exitCode === null && previousWorker.signalCode === null) {
+        previousWorker.kill("SIGKILL");
+      }
+    }, 1200);
+  };
+
+  const scheduleRestart = createDebouncedRestart(restartWorker, 180);
+  const watchTargets = [__filename, PUBLIC_DIR];
+
+  for (const target of watchTargets) {
+    const watcher = fs.watch(target, (eventType, fileName) => {
+      const fileHint = fileName ? `${target}/${fileName}` : target;
+      scheduleRestart(`${eventType}:${fileHint}`);
+    });
+    watchers.push(watcher);
+  }
+
+  worker.on("exit", (code, signal) => {
+    if (shuttingDown || restarting) {
+      return;
+    }
+    const reason = signal ? `signal:${signal}` : `code:${code ?? "unknown"}`;
+    console.log(`[hot] server worker exited (${reason}), waiting for file changes...`);
+  });
+
+  const shutdown = () => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    for (const watcher of watchers) {
+      watcher.close();
+    }
+    if (worker && worker.exitCode === null && worker.signalCode === null) {
+      worker.kill("SIGTERM");
+      setTimeout(() => {
+        if (worker && worker.exitCode === null && worker.signalCode === null) {
+          worker.kill("SIGKILL");
+        }
+      }, 1200);
+    }
+  };
+
+  process.on("SIGINT", () => {
+    shutdown();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    shutdown();
+    process.exit(0);
+  });
+}
+
+function bootstrap() {
+  if (process.env[HOT_RELOAD_CHILD_ENV] === "1" || HOT_RELOAD_DISABLED) {
+    startDashboardServer();
     return;
   }
+  console.log("[hot] hot reload enabled (set OPENCLAW_HOT_RELOAD=0 to disable)");
+  startHotReloadSupervisor();
+}
 
-  if (requestUrl.pathname === "/api/config") {
-    const config = safeReadJson(CONFIG_PATH);
-    sendJson(res, 200, sanitizeConfig(config));
-    return;
-  }
-
-  let filePath = path.join(PUBLIC_DIR, requestUrl.pathname);
-  if (requestUrl.pathname === "/") {
-    filePath = path.join(PUBLIC_DIR, "index.html");
-  }
-
-  if (!filePath.startsWith(PUBLIC_DIR)) {
-    sendText(res, 403, "Forbidden");
-    return;
-  }
-
-  serveStatic(res, filePath);
-});
-
-server.listen(PORT, () => {
-  console.log(`OpenClaw monitor dashboard running on http://localhost:${PORT}`);
-});
+bootstrap();
