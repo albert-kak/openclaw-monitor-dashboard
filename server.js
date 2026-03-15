@@ -10,6 +10,8 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const OPENCLAW_DIR = path.join(os.homedir(), ".openclaw");
 const AGENTS_DIR = path.join(OPENCLAW_DIR, "agents");
 const CONFIG_PATH = path.join(OPENCLAW_DIR, "openclaw.json");
+const CRON_JOBS_PATH = path.join(OPENCLAW_DIR, "cron", "jobs.json");
+const OPENCLAW_SKILLS_DIR = path.join(OPENCLAW_DIR, "skills");
 const LOG_PATHS = {
   gateway: path.join(OPENCLAW_DIR, "logs", "gateway.log"),
   gatewayError: path.join(OPENCLAW_DIR, "logs", "gateway.err.log"),
@@ -26,6 +28,14 @@ const MIME_TYPES = {
   ".svg": "image/svg+xml",
 };
 
+function isLoopbackRequest(req) {
+  const remote = req?.socket?.remoteAddress ?? "";
+  return remote === "127.0.0.1"
+    || remote === "::1"
+    || remote.startsWith("::ffff:127.")
+    || remote === "localhost";
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": MIME_TYPES[".json"] });
   res.end(JSON.stringify(payload, null, 2));
@@ -34,6 +44,99 @@ function sendJson(res, statusCode, payload) {
 function sendText(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
   res.end(payload);
+}
+
+function sendMethodNotAllowed(res, allowed = ["GET"]) {
+  res.writeHead(405, {
+    "Content-Type": "text/plain; charset=utf-8",
+    Allow: allowed.join(", "),
+  });
+  res.end("Method Not Allowed");
+}
+
+function readRequestBody(req, maxBytes = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function formatBackupSuffix(date = new Date()) {
+  const iso = date.toISOString(); // 2026-03-15T12:34:56.789Z
+  return iso
+    .replaceAll(":", "")
+    .replaceAll("-", "")
+    .replaceAll(".", "")
+    .replace("T", "-")
+    .replace("Z", "Z");
+}
+
+async function writeFileAtomically(filePath, content, options = {}) {
+  const dir = path.dirname(filePath);
+  const now = Date.now();
+  const tempPath = `${filePath}.tmp-${process.pid}-${now}`;
+  const mode = options.mode;
+  await fs.promises.writeFile(tempPath, content, { encoding: "utf8", mode });
+  await fs.promises.rename(tempPath, filePath);
+}
+
+async function runCommand(commandPath, args, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 25000;
+  const maxOutputBytes = options.maxOutputBytes ?? 96 * 1024;
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    const child = require("child_process").spawn(commandPath, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: options.env ?? process.env,
+    });
+
+    let stdout = Buffer.alloc(0);
+    let stderr = Buffer.alloc(0);
+    let timedOut = false;
+
+    const append = (target, chunk) => {
+      if (!chunk || chunk.length === 0) return target;
+      if (target.length >= maxOutputBytes) return target;
+      const remaining = maxOutputBytes - target.length;
+      return Buffer.concat([target, chunk.slice(0, remaining)]);
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), 1000);
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({
+        code,
+        signal,
+        timedOut,
+        durationMs: Date.now() - startedAt,
+        stdout: stdout.toString("utf8"),
+        stderr: stderr.toString("utf8"),
+      });
+    });
+  });
 }
 
 function safeReadJson(filePath) {
@@ -51,6 +154,82 @@ function safeStat(filePath) {
   } catch (error) {
     return null;
   }
+}
+
+function safeReadText(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (error) {
+    return "";
+  }
+}
+
+function fileExists(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.F_OK);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function resolveExecutablePathFromPath(binName) {
+  const pathValue = process.env.PATH ?? "";
+  const pathEntries = pathValue.split(path.delimiter).filter(Boolean);
+  for (const entry of pathEntries) {
+    const candidate = path.join(entry, binName);
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function resolveOpenclawInstallDir() {
+  const checked = new Set();
+  const candidates = [];
+  const executablePath = resolveExecutablePathFromPath("openclaw");
+
+  if (executablePath) {
+    candidates.push(executablePath);
+    try {
+      candidates.push(fs.realpathSync(executablePath));
+    } catch (error) {
+      // ignore broken links
+    }
+  }
+
+  candidates.push(
+    "/opt/homebrew/lib/node_modules/openclaw",
+    "/usr/local/lib/node_modules/openclaw",
+    path.join(os.homedir(), ".npm-global", "lib", "node_modules", "openclaw"),
+  );
+
+  for (const rawCandidate of candidates) {
+    if (!rawCandidate) continue;
+    const normalized = path.resolve(rawCandidate);
+    if (checked.has(normalized)) continue;
+    checked.add(normalized);
+
+    if (fileExists(path.join(normalized, "package.json")) && safeStat(normalized)?.isDirectory()) {
+      return normalized;
+    }
+
+    const parent = path.dirname(normalized);
+    if (
+      fileExists(path.join(parent, "package.json"))
+      && (fileExists(path.join(parent, "openclaw.mjs")) || fileExists(path.join(parent, "dist")))
+    ) {
+      return parent;
+    }
+
+    const guessedByBin = path.resolve(path.dirname(normalized), "..", "lib", "node_modules", "openclaw");
+    if (fileExists(path.join(guessedByBin, "package.json"))) {
+      return guessedByBin;
+    }
+  }
+
+  return null;
 }
 
 async function readTail(filePath, maxBytes = 512 * 1024) {
@@ -78,6 +257,22 @@ function toIsoTimestamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString();
+}
+
+function previewText(value, maxChars = 180) {
+  const normalized = normalizeText(value);
+  if (!normalized) return "";
+  return normalized.length <= maxChars
+    ? normalized
+    : `${normalized.slice(0, maxChars - 1)}…`;
+}
+
+function sortByTimeDesc(items, timeField) {
+  return items.slice().sort((a, b) => {
+    const aTime = Date.parse(a?.[timeField] ?? "") || 0;
+    const bTime = Date.parse(b?.[timeField] ?? "") || 0;
+    return bTime - aTime;
+  });
 }
 
 function collectContentText(content, options = {}) {
@@ -521,6 +716,195 @@ function sanitizeConfig(config) {
   };
 }
 
+function readCronJobs() {
+  const data = safeReadJson(CRON_JOBS_PATH);
+  if (!Array.isArray(data?.jobs)) {
+    return [];
+  }
+  return data.jobs
+    .filter((job) => job && typeof job === "object")
+    .map((job) => {
+      const state = job.state ?? {};
+      const delivery = job.delivery ?? {};
+      const payload = job.payload ?? {};
+      return {
+        id: job.id ?? "unknown",
+        name: job.name ?? "unnamed-job",
+        agentId: job.agentId ?? "unknown",
+        enabled: Boolean(job.enabled),
+        createdAt: toIsoTimestamp(job.createdAtMs),
+        updatedAt: toIsoTimestamp(job.updatedAtMs),
+        schedule: {
+          kind: job.schedule?.kind ?? "unknown",
+          expr: job.schedule?.expr ?? "",
+          tz: job.schedule?.tz ?? "",
+        },
+        payload: {
+          kind: payload.kind ?? "unknown",
+          message: typeof payload.message === "string" ? payload.message : "",
+          preview: previewText(payload.message ?? ""),
+        },
+        delivery: {
+          mode: delivery.mode ?? "unknown",
+          channel: delivery.channel ?? null,
+          target: delivery.target ?? null,
+          to: delivery.to ?? null,
+          im: delivery.im ?? null,
+        },
+        state: {
+          nextRunAt: toIsoTimestamp(state.nextRunAtMs),
+          lastRunAt: toIsoTimestamp(state.lastRunAtMs),
+          lastStatus: state.lastStatus ?? state.lastRunStatus ?? "unknown",
+          lastDurationMs: typeof state.lastDurationMs === "number" ? state.lastDurationMs : null,
+          consecutiveErrors: typeof state.consecutiveErrors === "number" ? state.consecutiveErrors : 0,
+          lastDeliveryStatus: state.lastDeliveryStatus ?? "unknown",
+          lastError: previewText(state.lastError ?? "", 220),
+        },
+      };
+    });
+}
+
+function buildCronSummary(jobs) {
+  const enabled = jobs.filter((job) => job.enabled).length;
+  const disabled = jobs.length - enabled;
+  const errors = jobs.filter((job) => job.state.lastStatus === "error").length;
+  const nextRunCandidates = jobs
+    .map((job) => job.state.nextRunAt)
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
+  return {
+    total: jobs.length,
+    enabled,
+    disabled,
+    errors,
+    nextRunAt: nextRunCandidates[0] ?? null,
+  };
+}
+
+function collectSkillMarkdownFiles(rootDir, maxDepth = 6) {
+  const rootStat = safeStat(rootDir);
+  if (!rootStat?.isDirectory()) {
+    return [];
+  }
+
+  const stack = [{ dir: rootDir, depth: 0 }];
+  const results = [];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current.dir, { withFileTypes: true });
+    } catch (error) {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(current.dir, entry.name);
+      if (entry.isFile() && entry.name.toLowerCase() === "skill.md") {
+        results.push(entryPath);
+        continue;
+      }
+      if (entry.isDirectory() && current.depth < maxDepth) {
+        stack.push({ dir: entryPath, depth: current.depth + 1 });
+      }
+    }
+  }
+
+  return results;
+}
+
+function pickSkillDescription(rawText) {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  for (const line of lines) {
+    if (line.startsWith("#")) continue;
+    if (line.startsWith("```")) continue;
+    return line;
+  }
+  return "";
+}
+
+function parseSkillFile(skillFilePath, source) {
+  const content = safeReadText(skillFilePath);
+  if (!content) {
+    return null;
+  }
+  const lines = content.split(/\r?\n/);
+  const heading = lines.find((line) => /^#\s+/.test(line)) ?? "";
+  const relativePath = path.relative(source.root, path.dirname(skillFilePath)) || ".";
+  const stat = safeStat(skillFilePath);
+  return {
+    id: `${source.id}:${relativePath}`,
+    name: heading.replace(/^#\s+/, "").trim() || path.basename(path.dirname(skillFilePath)),
+    description: previewText(pickSkillDescription(content), 220),
+    source: source.id,
+    sourceLabel: source.label,
+    scope: source.scope ?? "custom",
+    relativePath,
+    path: skillFilePath,
+    updatedAt: toIsoTimestamp(stat?.mtimeMs ?? null),
+  };
+}
+
+function readSkillsInventory() {
+  const installDir = resolveOpenclawInstallDir();
+  const sources = [
+    {
+      id: "openclaw-custom",
+      label: "OpenClaw 自定义",
+      root: OPENCLAW_SKILLS_DIR,
+      scope: "custom",
+    },
+  ];
+  if (installDir) {
+    sources.push(
+      {
+        id: "openclaw-system-core",
+        label: "OpenClaw 系统",
+        root: path.join(installDir, "skills"),
+        scope: "system",
+      },
+      {
+        id: "openclaw-system-extensions",
+        label: "OpenClaw 扩展",
+        root: path.join(installDir, "extensions"),
+        scope: "system",
+      },
+    );
+  }
+
+  const skills = [];
+  for (const source of sources) {
+    const files = collectSkillMarkdownFiles(source.root);
+    for (const skillFile of files) {
+      const parsed = parseSkillFile(skillFile, source);
+      if (parsed) {
+        skills.push(parsed);
+      }
+    }
+  }
+
+  const sorted = sortByTimeDesc(skills, "updatedAt");
+  const summary = {
+    total: sorted.length,
+    system: sorted.filter((item) => item.scope === "system").length,
+    custom: sorted.filter((item) => item.scope === "custom").length,
+    sources: sources.map((source) => ({
+      id: source.id,
+      label: source.label,
+      count: sorted.filter((item) => item.source === source.id).length,
+    })),
+    installDir,
+  };
+
+  return {
+    summary,
+    skills: sorted,
+  };
+}
+
 function serveStatic(res, filePath) {
   fs.readFile(filePath, (error, data) => {
     if (error) {
@@ -544,6 +928,10 @@ function createRequestHandler() {
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);
 
     if (requestUrl.pathname === "/api/summary") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
       const config = safeReadJson(CONFIG_PATH);
       const logTail = await readTail(LOG_PATHS.gateway);
       const logLines = parseLogLines(logTail);
@@ -552,6 +940,10 @@ function createRequestHandler() {
     }
 
     if (requestUrl.pathname === "/api/agents") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
       const config = safeReadJson(CONFIG_PATH);
       const logTail = await readTail(LOG_PATHS.gateway);
       const logLines = parseLogLines(logTail);
@@ -561,6 +953,10 @@ function createRequestHandler() {
     }
 
     if (requestUrl.pathname === "/api/logs") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
       const type = requestUrl.searchParams.get("type") ?? "gateway";
       const requestedLines = Number(requestUrl.searchParams.get("lines") ?? 200);
       const lines = Number.isFinite(requestedLines)
@@ -595,8 +991,155 @@ function createRequestHandler() {
     }
 
     if (requestUrl.pathname === "/api/config") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
       const config = safeReadJson(CONFIG_PATH);
       sendJson(res, 200, sanitizeConfig(config));
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/config/file") {
+      if (!isLoopbackRequest(req)) {
+        sendText(res, 403, "Forbidden");
+        return;
+      }
+      if (req.method === "GET") {
+        const stat = safeStat(CONFIG_PATH);
+        const content = stat?.isFile() ? safeReadText(CONFIG_PATH) : "";
+        let parseError = null;
+        if (content) {
+          try {
+            JSON.parse(content);
+          } catch (error) {
+            parseError = error?.message ?? "Invalid JSON";
+          }
+        }
+        sendJson(res, 200, {
+          path: CONFIG_PATH,
+          exists: Boolean(stat?.isFile()),
+          size: stat?.isFile() ? stat.size : 0,
+          mtimeMs: stat?.isFile() ? stat.mtimeMs : null,
+          mtimeIso: stat?.isFile() ? toIsoTimestamp(stat.mtimeMs) : null,
+          content,
+          parseError,
+        });
+        return;
+      }
+      if (req.method === "POST") {
+        try {
+          const rawBody = await readRequestBody(req, 2 * 1024 * 1024);
+          const body = rawBody ? JSON.parse(rawBody) : {};
+          const content = body?.content;
+          if (typeof content !== "string") {
+            sendJson(res, 400, { ok: false, error: "Missing field: content (string)" });
+            return;
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(content);
+          } catch (error) {
+            sendJson(res, 400, { ok: false, error: `Invalid JSON: ${error?.message ?? "parse error"}` });
+            return;
+          }
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            sendJson(res, 400, { ok: false, error: "Config must be a JSON object." });
+            return;
+          }
+
+          await fs.promises.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
+          const existingStat = safeStat(CONFIG_PATH);
+          const mode = existingStat?.isFile() ? (existingStat.mode & 0o777) : 0o600;
+
+          let backupPath = null;
+          if (existingStat?.isFile()) {
+            backupPath = `${CONFIG_PATH}.bak-${formatBackupSuffix(new Date())}`;
+            try {
+              await fs.promises.copyFile(CONFIG_PATH, backupPath);
+            } catch (error) {
+              backupPath = null;
+            }
+          }
+
+          await writeFileAtomically(CONFIG_PATH, content, { mode });
+          const stat = safeStat(CONFIG_PATH);
+          sendJson(res, 200, {
+            ok: true,
+            path: CONFIG_PATH,
+            backupPath,
+            size: stat?.isFile() ? stat.size : null,
+            mtimeMs: stat?.isFile() ? stat.mtimeMs : null,
+            mtimeIso: stat?.isFile() ? toIsoTimestamp(stat.mtimeMs) : null,
+          });
+        } catch (error) {
+          const message = error?.message ?? "Failed to save config";
+          if (message.toLowerCase().includes("too large")) {
+            sendJson(res, 413, { ok: false, error: message });
+            return;
+          }
+          sendJson(res, 500, { ok: false, error: message });
+        }
+        return;
+      }
+
+      sendMethodNotAllowed(res, ["GET", "POST"]);
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/gateway/restart") {
+      if (!isLoopbackRequest(req)) {
+        sendText(res, 403, "Forbidden");
+        return;
+      }
+      if (req.method !== "POST") {
+        sendMethodNotAllowed(res, ["POST"]);
+        return;
+      }
+
+      req.resume();
+      const openclawPath = resolveExecutablePathFromPath("openclaw");
+      if (!openclawPath) {
+        sendJson(res, 500, { ok: false, error: "openclaw executable not found on PATH" });
+        return;
+      }
+
+      const result = await runCommand(openclawPath, ["daemon", "restart"], {
+        timeoutMs: 30000,
+        maxOutputBytes: 128 * 1024,
+      });
+      sendJson(res, 200, {
+        ok: !result.timedOut && (result.code === 0 || result.code == null),
+        openclawPath,
+        ...result,
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/schedules") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
+      const jobs = readCronJobs();
+      sendJson(res, 200, {
+        summary: buildCronSummary(jobs),
+        jobs: jobs.sort((a, b) => {
+          const aNext = Date.parse(a.state.nextRunAt ?? "") || Number.MAX_SAFE_INTEGER;
+          const bNext = Date.parse(b.state.nextRunAt ?? "") || Number.MAX_SAFE_INTEGER;
+          return aNext - bNext;
+        }),
+      });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/skills") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
+      sendJson(res, 200, readSkillsInventory());
       return;
     }
 

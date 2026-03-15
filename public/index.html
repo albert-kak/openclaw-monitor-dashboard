@@ -5,6 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OpenClaw Monitor Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/dialog/dialog.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/lint/lint.min.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css"
+    />
   </head>
   <body>
     <div class="orb"></div>
@@ -24,10 +44,12 @@
     </header>
 
     <nav class="tabs" role="tablist">
-      <button class="tab tab--active" data-tab="overview" role="tab">Overview</button>
-      <button class="tab" data-tab="agents" role="tab">Agents</button>
-      <button class="tab" data-tab="logs" role="tab">Logs</button>
-      <button class="tab" data-tab="config" role="tab">Config</button>
+      <button class="tab tab--active" data-tab="overview" role="tab">📊 概览</button>
+      <button class="tab" data-tab="agents" role="tab">🤖 代理</button>
+      <button class="tab" data-tab="schedules" role="tab">⏰ 定时任务</button>
+      <button class="tab" data-tab="skills" role="tab">🧩 技能管理</button>
+      <button class="tab" data-tab="logs" role="tab">📜 日志</button>
+      <button class="tab" data-tab="config" role="tab">⚙️ 配置</button>
     </nav>
 
     <main class="content">
@@ -70,31 +92,107 @@
 
       <section class="panel" id="logs" role="tabpanel">
         <div class="panel__header">
-          <h2>Log Stream</h2>
-          <p>Tail of gateway logs from ~/.openclaw/logs.</p>
+          <h2>日志时间轴</h2>
+          <p>Tail of gateway logs from ~/.openclaw/logs，支持关键字过滤和分级高亮。</p>
         </div>
-        <div class="log-controls">
-          <select id="log-type">
-            <option value="gateway">gateway.log</option>
-            <option value="gatewayError">gateway.err.log</option>
-          </select>
-          <button class="btn" id="refresh-logs">Refresh</button>
+        <div class="log-stream">
+          <div class="log-controls">
+            <select id="log-type">
+              <option value="gateway">gateway.log</option>
+              <option value="gatewayError">gateway.err.log</option>
+            </select>
+            <input id="log-search" type="search" placeholder="Filter logs..." />
+            <div class="log-level-filters" role="group" aria-label="日志级别筛选">
+              <button class="btn btn--compact btn--active" id="log-level-all" type="button">All</button>
+              <button class="btn btn--compact" id="log-level-issues" type="button">Error + Warn</button>
+            </div>
+            <button class="btn" id="log-autoscroll" type="button">Auto Scroll: On</button>
+            <button class="btn" id="refresh-logs" type="button">Refresh</button>
+            <button class="btn" id="clear-logs" type="button">Clear</button>
+          </div>
+          <div class="log-stream__stats" id="log-stats"></div>
+          <div class="log-stream__viewport" id="log-viewport" tabindex="0">
+            <div class="log-stream__timeline" id="log-box" role="log" aria-live="polite"></div>
+          </div>
         </div>
-        <pre class="log-box" id="log-box"></pre>
       </section>
 
       <section class="panel" id="config" role="tabpanel">
         <div class="panel__header">
-          <h2>Sanitized Config</h2>
-          <p>Only non-sensitive fields are shown.</p>
+          <h2>配置文件</h2>
+          <p>可编辑并保存本地 <code>~/.openclaw/openclaw.json</code>（包含敏感信息，建议仅在本机 <code>localhost</code> 访问）。</p>
         </div>
-        <pre class="code-box" id="config-box"></pre>
+        <section class="module" aria-label="配置编辑器">
+          <div class="module__header">
+            <h2>openclaw.json</h2>
+            <div class="module__meta" id="config-file-meta"></div>
+          </div>
+          <div class="config-toolbar">
+            <div class="config-path" id="config-file-path"></div>
+            <div class="config-actions">
+              <button class="btn" id="config-reload" type="button">Reload</button>
+              <button class="btn" id="config-format" type="button">Format</button>
+              <button class="btn" id="config-validate" type="button">Validate</button>
+              <button class="btn" id="config-wrap" type="button">Soft Wrap: Off</button>
+              <button class="btn" id="config-save" type="button">Save</button>
+            </div>
+          </div>
+          <textarea class="code-editor" id="config-editor" spellcheck="false"></textarea>
+          <div class="config-editor-status" id="config-editor-status">
+            <span id="config-cursor-status">Ln 1, Col 1</span>
+            <span id="config-json-status">JSON status: unknown</span>
+            <span>Shortcuts: Ctrl/Cmd+S Save · Ctrl/Cmd+F Search · Ctrl/Cmd+Alt+F Format</span>
+          </div>
+          <div class="inline-message" id="config-message" role="status" aria-live="polite"></div>
+        </section>
+
+        <section class="module" aria-label="Gateway 控制">
+          <div class="module__header">
+            <h2>Gateway</h2>
+            <div class="module__meta" id="gateway-action-meta"></div>
+          </div>
+          <div class="config-actions">
+            <button class="btn btn--danger" id="gateway-restart" type="button">Restart gateway</button>
+          </div>
+          <pre class="code-box code-box--compact" id="gateway-action-output"></pre>
+        </section>
+      </section>
+
+      <section class="panel" id="schedules" role="tabpanel">
+        <div class="panel__header">
+          <h2>定时任务</h2>
+          <p id="schedule-meta">Cron jobs from ~/.openclaw/cron/jobs.json</p>
+        </div>
+        <div class="schedule-list" id="schedule-list"></div>
+      </section>
+
+      <section class="panel" id="skills" role="tabpanel">
+        <div class="panel__header">
+          <h2>技能管理</h2>
+          <p id="skill-meta">Skills from ~/.openclaw/skills + OpenClaw 安装目录</p>
+        </div>
+        <div class="skill-list" id="skill-list"></div>
       </section>
     </main>
 
     <footer class="footer">
       Data source: <span>~/.openclaw</span> · Auto-refresh every 3 seconds
     </footer>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/search.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/dialog/dialog.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsonlint/1.6.3/jsonlint.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/lint/lint.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/lint/json-lint.min.js"></script>
 
     <script src="/app.js"></script>
   </body>
