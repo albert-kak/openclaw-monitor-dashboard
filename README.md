@@ -23,6 +23,8 @@ OPENCLAW_HOT_RELOAD=0 node server.js
 - `~/.openclaw/openclaw.json`
 - `~/.openclaw/logs/gateway.log`
 - `~/.openclaw/logs/gateway.err.log`
+- `~/.openclaw/agents/*/sessions/sessions.json`
+- `~/.openclaw/agents/*/sessions/*.jsonl`
 
 ## Notes
 

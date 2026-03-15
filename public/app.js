@@ -5,6 +5,7 @@ const state = {
   refreshInFlight: false,
   realtimeLogFilter: "全部",
   realtimeLogRawLines: [],
+  realtimeLogExpandedKeys: new Set(),
   realtimeLogAutoScroll: true,
   realtimeLogLastUpdateAt: null,
 };
@@ -34,6 +35,8 @@ const statusLabels = {
   offline: "离线",
   unknown: "未知",
 };
+
+const REALTIME_LOG_PREVIEW_CHARS = 220;
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -300,9 +303,18 @@ const realtimeLogFilters = [
   { id: "全栈", icon: "🧩" },
   { id: "分析", icon: "🧠" },
   { id: "工具调用", icon: "🛠" },
-  { id: "文字输出", icon: "✎" },
+  { id: "文字输出", icon: "📝" },
   { id: "执行结果", icon: "✅" },
 ];
+
+const realtimeLogIconByTag = {
+  管理者: "👑",
+  全栈: "🧩",
+  分析: "🧠",
+  工具调用: "🛠",
+  文字输出: "📝",
+  执行结果: "✅",
+};
 
 function extractTimestamp(line) {
   if (!line) return { timestampIso: null, rest: "" };
@@ -340,8 +352,8 @@ function deriveRealtimeTags(text) {
     tags.add("分析");
   }
 
-  const isToolCall = /\b(exec|read|write|spawn|curl|find|grep)\([^)]*\)/i.test(text);
-  const isToolResult = /\b(exec|read|write)\s*:/i.test(text) || /\(no output\)/i.test(lower);
+  const isToolCall = /\btoolcall\b/i.test(text) || /\b(exec|read|write|spawn|curl|find|grep)\([^)]*\)/i.test(text);
+  const isToolResult = /\btoolresult\b/i.test(text) || /\b(exec|read|write)\s*:/i.test(text) || /\(no output\)/i.test(lower);
   if (isToolCall) tags.add("工具调用");
   if (isToolResult) tags.add("执行结果");
 
@@ -367,14 +379,28 @@ function deriveRealtimeKind(tags, text) {
   return "output";
 }
 
-function iconForKind(kind) {
-  if (kind === "tool-call") return "⚡";
-  if (kind === "tool-result") return "✅";
-  if (kind === "analysis") return "🧠";
-  if (kind === "system") return "👑";
-  if (kind === "warn") return "⚠";
-  if (kind === "error") return "⛔";
-  return "•";
+function iconForTags(tags) {
+  const priority = ["工具调用", "执行结果", "分析", "全栈", "管理者", "文字输出"];
+  for (const tag of priority) {
+    if (tags.has(tag)) {
+      return realtimeLogIconByTag[tag];
+    }
+  }
+  return realtimeLogIconByTag.文字输出;
+}
+
+function buildLogPreview(text, maxChars = REALTIME_LOG_PREVIEW_CHARS) {
+  const normalized = String(text ?? "");
+  if (normalized.length <= maxChars) {
+    return {
+      preview: normalized,
+      truncated: false,
+    };
+  }
+  return {
+    preview: `${normalized.slice(0, maxChars)}…`,
+    truncated: true,
+  };
 }
 
 function decorateLogText(text) {
@@ -395,10 +421,11 @@ function buildRealtimeEntries(rawLines) {
     const message = (rest ?? "").trimStart();
     const tags = deriveRealtimeTags(message);
     const kind = deriveRealtimeKind(tags, message);
-    const icon = iconForKind(kind);
+    const icon = iconForTags(tags);
     const time = timestampIso ? formatTime(timestampIso) : (line.match(/^(\d{2}:\d{2}:\d{2})/)?.[1] ?? "—");
 
     return {
+      key: line || `${time}|${message}`,
       line,
       time,
       message,
@@ -450,15 +477,38 @@ function renderRealtimeLogs() {
 
   elements.realtimeLogLines.innerHTML = filtered
     .map((entry) => {
+      const fullText = entry.message || entry.line || "";
+      const preview = buildLogPreview(fullText);
+      const expanded = state.realtimeLogExpandedKeys.has(entry.key);
+      const displayText = expanded ? fullText : preview.preview;
+      const toggleMarkup = preview.truncated
+        ? `<button class="log-line__toggle" type="button" data-log-expand="${escapeHtml(entry.key)}">${expanded ? "收起" : "展开"}</button>`
+        : "";
       return `
         <div class="log-line log-line--${escapeHtml(entry.kind)}">
           <div class="log-line__time">${escapeHtml(entry.time)}</div>
           <div class="log-line__icon" aria-hidden="true">${escapeHtml(entry.icon)}</div>
-          <div class="log-line__text">${decorateLogText(entry.message || entry.line)}</div>
+          <div class="log-line__content">
+            <div class="log-line__text">${decorateLogText(displayText)}</div>
+            ${toggleMarkup}
+          </div>
         </div>
       `;
     })
     .join("");
+
+  elements.realtimeLogLines.querySelectorAll("[data-log-expand]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.logExpand;
+      if (!key) return;
+      if (state.realtimeLogExpandedKeys.has(key)) {
+        state.realtimeLogExpandedKeys.delete(key);
+      } else {
+        state.realtimeLogExpandedKeys.add(key);
+      }
+      renderRealtimeLogs();
+    });
+  });
 
   if (shouldStick) {
     viewport.scrollTop = viewport.scrollHeight;
@@ -475,7 +525,7 @@ function renderRealtimeLogs() {
         hour12: false,
       })
       : "—";
-    elements.realtimeLogMeta.textContent = `gateway.log · ${entries.length} lines · ${updatedAt}`;
+    elements.realtimeLogMeta.textContent = `agent sessions · ${entries.length} lines · ${updatedAt}`;
   }
 }
 
@@ -507,7 +557,7 @@ function mergeLogTail(previous, nextTail, limit = 600) {
 }
 
 async function refreshRealtimeLogs() {
-  const data = await fetchJson("/api/logs?type=gateway&lines=350");
+  const data = await fetchJson("/api/logs?type=session&lines=350");
   state.realtimeLogRawLines = mergeLogTail(state.realtimeLogRawLines, data.lines ?? []);
   state.realtimeLogLastUpdateAt = Date.now();
   renderRealtimeLogs();
