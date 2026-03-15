@@ -2,12 +2,16 @@ const state = {
   summary: null,
   agents: [],
   config: null,
+  refreshInFlight: false,
+  realtimeLogFilter: "全部",
+  realtimeLogRawLines: [],
+  realtimeLogAutoScroll: true,
+  realtimeLogLastUpdateAt: null,
 };
 
 const elements = {
   tabs: document.querySelectorAll(".tab"),
   panels: document.querySelectorAll(".panel"),
-  summaryCards: document.getElementById("summary-cards"),
   agentStatus: document.getElementById("agent-status"),
   agentMeta: document.getElementById("agent-meta"),
   agentList: document.getElementById("agent-list"),
@@ -17,14 +21,18 @@ const elements = {
   configBox: document.getElementById("config-box"),
   gatewayDot: document.getElementById("gateway-dot"),
   gatewayText: document.getElementById("gateway-text"),
+  realtimeLogMeta: document.getElementById("realtime-log-meta"),
+  realtimeLogFilters: document.getElementById("realtime-log-filters"),
+  realtimeLogViewport: document.getElementById("realtime-log-viewport"),
+  realtimeLogLines: document.getElementById("realtime-log-lines"),
 };
 
 const statusLabels = {
-  active: "Active",
-  idle: "Idle",
-  stale: "Stale",
-  offline: "Offline",
-  unknown: "Unknown",
+  active: "运行中",
+  idle: "空闲",
+  stale: "待关注",
+  offline: "离线",
+  unknown: "未知",
 };
 
 function formatDate(iso) {
@@ -34,60 +42,58 @@ function formatDate(iso) {
   return date.toLocaleString();
 }
 
+function formatTime(iso) {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function escapeHtml(value) {
+  if (value == null) return "";
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function statusDotClass(state) {
   return `status-dot status-dot--${state || "unknown"}`;
 }
 
-function buildSummaryCards(summary, agents) {
-  if (!summary) return [];
-  const activeCount = agents.filter((agent) => agent.state === "active").length;
-  const idleCount = agents.filter((agent) => agent.state === "idle").length;
-  const staleCount = agents.filter((agent) => agent.state === "stale").length;
-  const offlineCount = agents.filter((agent) => agent.state === "offline").length;
+function resolveAgentEmoji() {
+  return "🧑‍💻";
+}
 
-  return [
-    {
-      label: "Agents Online",
-      value: `${activeCount + idleCount}/${summary.agents.count}`,
-      meta: `${activeCount} active · ${idleCount} idle`,
-    },
-    {
-      label: "Agents Stale",
-      value: staleCount,
-      meta: `${offlineCount} offline`,
-    },
-    {
-      label: "Gateway Port",
-      value: summary.gateway.port ?? "—",
-      meta: summary.gateway.mode ? `${summary.gateway.mode} · ${summary.gateway.bind}` : "—",
-    },
-    {
-      label: "Last Run",
-      value: summary.lastRunCommand ?? "—",
-      meta: formatDate(summary.lastRunAt),
-    },
-  ];
+function resolveStateEmoji(state) {
+  if (state === "active") return "⌨️";
+  if (state === "idle") return "☕";
+  if (state === "stale") return "⏳";
+  if (state === "offline") return "💤";
+  return "❔";
+}
+
+function resolveAgentRole(isRoot) {
+  return isRoot ? "主控" : "子代理";
 }
 
 function renderSummary() {
-  const cards = buildSummaryCards(state.summary, state.agents);
-  elements.summaryCards.innerHTML = cards
-    .map(
-      (card) => `
-      <article class="card">
-        <div class="card__label">${card.label}</div>
-        <div class="card__value">${card.value}</div>
-        <div class="card__meta">${card.meta}</div>
-      </article>
-    `,
-    )
-    .join("");
-
   if (state.summary?.logs?.lastEventAt) {
-    elements.gatewayDot.className = statusDotClass(
-      deriveGatewayStatus(state.summary.logs.lastEventAt),
-    );
-    elements.gatewayText.textContent = `Gateway · ${formatDate(state.summary.logs.lastEventAt)}`;
+    if (elements.gatewayDot) {
+      elements.gatewayDot.className = statusDotClass(
+        deriveGatewayStatus(state.summary.logs.lastEventAt),
+      );
+    }
+    if (elements.gatewayText) {
+      elements.gatewayText.textContent = `Gateway · ${formatDate(state.summary.logs.lastEventAt)}`;
+    }
   }
 }
 
@@ -101,46 +107,111 @@ function deriveGatewayStatus(lastEventAt) {
 }
 
 function renderAgentStatus() {
-  if (!state.agents.length) {
-    elements.agentStatus.innerHTML = `<div class="card">No agents found.</div>`;
-    elements.agentMeta.textContent = "";
+  if (!elements.agentStatus) {
     return;
   }
-  elements.agentMeta.textContent = `Last refresh: ${new Date().toLocaleTimeString()}`;
-  elements.agentStatus.innerHTML = state.agents
+  if (!state.agents.length) {
+    elements.agentStatus.innerHTML = `<div class="card">No agents found.</div>`;
+    if (elements.agentMeta) {
+      elements.agentMeta.textContent = "";
+    }
+    return;
+  }
+
+  const rootAgent = state.agents.find((agent) => agent.default) ?? state.agents[0];
+  const childAgents = state.agents.filter((agent) => agent.id !== rootAgent.id);
+  const rootBinding = rootAgent.bindings[0];
+  const rootCurrent = rootBinding
+    ? `${rootBinding.channel}:${rootBinding.accountId}`
+    : "No binding";
+  const rootEmoji = resolveAgentEmoji();
+  const rootStateEmoji = resolveStateEmoji(rootAgent.state);
+  const rootRole = resolveAgentRole(true);
+
+  const childMarkup = childAgents
     .map((agent) => {
-      const bindings = agent.bindings
-        .map(
-          (binding) => `
-          <div class="binding">
-            <span>${binding.channel}</span>
-            <strong>${binding.accountId}</strong>
-            <span>${statusLabels[binding.status?.state ?? "unknown"]}</span>
-          </div>
-        `,
-        )
-        .join("");
+      const bindingText = agent.bindings.length
+        ? `${agent.bindings[0].channel}:${agent.bindings[0].accountId}`
+        : "No binding";
+      const agentEmoji = resolveAgentEmoji();
+      const stateEmoji = resolveStateEmoji(agent.state);
+      const role = resolveAgentRole(false);
 
       return `
-        <article class="card agent-card">
-          <div class="agent-card__title">
-            <span>${agent.id}</span>
-            <span class="tag">
-              <span class="${statusDotClass(agent.state)}"></span>
-              ${statusLabels[agent.state]}
+        <article class="agent-node agent-node--child">
+          <div class="agent-node__hero">
+            <span class="agent-node__emoji-pack">
+              <span class="agent-node__emoji agent-node__emoji--avatar">${agentEmoji}</span>
+              <span class="agent-node__emoji agent-node__emoji--state ${agent.state === "active" ? "agent-node__emoji--typing" : ""}">${stateEmoji}</span>
+              ${agent.state === "active" ? '<span class="agent-node__typing-dots">...</span>' : ""}
+              <span class="agent-node__spark agent-node__spark--a">✨</span>
+              <span class="agent-node__spark agent-node__spark--b">•</span>
             </span>
           </div>
-          <div class="agent-card__meta">Model: ${agent.model}</div>
-          <div class="agent-card__meta">Workspace: ${agent.workspace}</div>
-          <div class="agent-card__meta">Last event: ${formatDate(agent.lastEventAt)}</div>
-          <div class="binding-list">${bindings || "<span>No bindings</span>"}</div>
+          <div class="agent-node__meta-row">
+            <div class="agent-node__meta-left">
+              <span class="agent-node__dot agent-node__dot--${agent.state ?? "unknown"}"></span>
+              <div>
+                <div class="agent-node__title">${agent.id}</div>
+                <div class="agent-node__role">${role}</div>
+              </div>
+            </div>
+            <span class="state-pill state-pill--${agent.state ?? "unknown"}">${statusLabels[agent.state] ?? statusLabels.unknown}</span>
+          </div>
+          <div class="agent-node__line agent-node__line--current">当前: ${bindingText}</div>
+          <div class="agent-node__line">模型: ${agent.model}</div>
+          <div class="agent-node__line">最近: ${formatDate(agent.lastEventAt)}</div>
         </article>
       `;
     })
     .join("");
+
+  if (elements.agentMeta) {
+    elements.agentMeta.textContent = `Last refresh: ${new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    })}`;
+  }
+  elements.agentStatus.innerHTML = `
+    <div class="agent-topology">
+      <article class="agent-node agent-node--root">
+        <div class="agent-node__hero">
+          <span class="agent-node__emoji-pack">
+            <span class="agent-node__emoji agent-node__emoji--avatar">${rootEmoji}</span>
+            <span class="agent-node__emoji agent-node__emoji--state ${rootAgent.state === "active" ? "agent-node__emoji--typing" : ""}">${rootStateEmoji}</span>
+            ${rootAgent.state === "active" ? '<span class="agent-node__typing-dots">...</span>' : ""}
+            <span class="agent-node__spark agent-node__spark--a">✨</span>
+            <span class="agent-node__spark agent-node__spark--b">•</span>
+          </span>
+        </div>
+        <div class="agent-node__meta-row">
+          <div class="agent-node__meta-left">
+            <span class="agent-node__dot agent-node__dot--${rootAgent.state ?? "unknown"}"></span>
+            <div>
+              <div class="agent-node__title">${rootAgent.id}</div>
+              <div class="agent-node__role">${rootRole}</div>
+            </div>
+          </div>
+          <span class="state-pill state-pill--${rootAgent.state ?? "unknown"}">${statusLabels[rootAgent.state] ?? statusLabels.unknown}</span>
+        </div>
+        <div class="agent-node__line agent-node__line--current">当前: ${rootCurrent}</div>
+        <div class="agent-node__line">工作区: ${rootAgent.workspace}</div>
+        <div class="agent-node__line">模型: ${rootAgent.model}</div>
+      </article>
+      <div class="agent-links"></div>
+      <div class="agent-children ${childAgents.length <= 1 ? "agent-children--single" : ""}">
+        ${childMarkup || '<article class="agent-node agent-node--child"><div class="agent-node__line">No sub agent</div></article>'}
+      </div>
+    </div>
+  `;
 }
 
 function renderAgentList() {
+  if (!elements.agentList) {
+    return;
+  }
   if (!state.agents.length) {
     elements.agentList.innerHTML = `<div class="card">No agent data available.</div>`;
     return;
@@ -160,7 +231,7 @@ function renderAgentList() {
           <div class="agent-row__grid">
             <div class="agent-row__item">
               <strong>Status</strong>
-              ${statusLabels[agent.state]}
+              ${statusLabels[agent.state] ?? statusLabels.unknown}
             </div>
             <div class="agent-row__item">
               <strong>Model</strong>
@@ -207,33 +278,277 @@ async function refreshAgents() {
 }
 
 async function refreshLogs() {
+  if (!elements.logType || !elements.logBox) {
+    return;
+  }
   const type = elements.logType.value;
   const data = await fetchJson(`/api/logs?type=${type}&lines=200`);
   elements.logBox.textContent = data.lines.join("\n");
 }
 
 async function refreshConfig() {
+  if (!elements.configBox) {
+    return;
+  }
   state.config = await fetchJson("/api/config");
   elements.configBox.textContent = JSON.stringify(state.config, null, 2);
+}
+
+const realtimeLogFilters = [
+  { id: "全部", icon: "●" },
+  { id: "管理者", icon: "👑" },
+  { id: "全栈", icon: "🧩" },
+  { id: "分析", icon: "🧠" },
+  { id: "工具调用", icon: "🛠" },
+  { id: "文字输出", icon: "✎" },
+  { id: "执行结果", icon: "✅" },
+];
+
+function extractTimestamp(line) {
+  if (!line) return { timestampIso: null, rest: "" };
+  const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}T[^ ]+)\s+(.*)$/);
+  if (isoMatch) {
+    const iso = isoMatch[1];
+    const rest = isoMatch[2] ?? "";
+    const date = new Date(iso);
+    return {
+      timestampIso: Number.isNaN(date.getTime()) ? null : date.toISOString(),
+      rest,
+    };
+  }
+  const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s+(.*)$/);
+  if (timeMatch) {
+    return { timestampIso: null, rest: timeMatch[2] ?? "" };
+  }
+  return { timestampIso: null, rest: line };
+}
+
+function deriveRealtimeTags(text) {
+  const tags = new Set();
+  const lower = (text ?? "").toLowerCase();
+
+  if (/(system message|\[system\]|\bsystem\b)/i.test(text)) {
+    tags.add("管理者");
+  }
+  if (/(manager|\[manager\]|管理者)/i.test(text)) {
+    tags.add("管理者");
+  }
+  if (/(full\s*stack|\[fullstack\]|全栈)/i.test(text)) {
+    tags.add("全栈");
+  }
+  if (/(analysis|\[analysis\]|分析)/i.test(text)) {
+    tags.add("分析");
+  }
+
+  const isToolCall = /\b(exec|read|write|spawn|curl|find|grep)\([^)]*\)/i.test(text);
+  const isToolResult = /\b(exec|read|write)\s*:/i.test(text) || /\(no output\)/i.test(lower);
+  if (isToolCall) tags.add("工具调用");
+  if (isToolResult) tags.add("执行结果");
+
+  if (!isToolCall && !isToolResult) {
+    tags.add("文字输出");
+  }
+
+  return tags;
+}
+
+function deriveRealtimeKind(tags, text) {
+  const lower = (text ?? "").toLowerCase();
+  if (/\b(error|fatal|exception|traceback)\b/i.test(text) || lower.includes("enoent")) {
+    return "error";
+  }
+  if (/\b(warn|warning|deprecated|missing)\b/i.test(text)) {
+    return "warn";
+  }
+  if (tags.has("工具调用")) return "tool-call";
+  if (tags.has("执行结果")) return "tool-result";
+  if (tags.has("分析")) return "analysis";
+  if (tags.has("管理者")) return "system";
+  return "output";
+}
+
+function iconForKind(kind) {
+  if (kind === "tool-call") return "⚡";
+  if (kind === "tool-result") return "✅";
+  if (kind === "analysis") return "🧠";
+  if (kind === "system") return "👑";
+  if (kind === "warn") return "⚠";
+  if (kind === "error") return "⛔";
+  return "•";
+}
+
+function decorateLogText(text) {
+  const escaped = escapeHtml(text);
+  return escaped
+    .replace(
+      /(\b(?:exec|read|write|spawn|curl|find|grep)\([^)]*\))/gi,
+      '<span class="log-token log-token--call">$1</span>',
+    )
+    .replace(/(\b(?:exec|read|write)\s*:)/gi, '<span class="log-token log-token--result">$1</span>')
+    .replace(/(https?:\/\/[^\s]+)/gi, '<span class="log-token log-token--url">$1</span>')
+    .replace(/(\/[^\s)>"']+)/g, '<span class="log-token log-token--path">$1</span>');
+}
+
+function buildRealtimeEntries(rawLines) {
+  return rawLines.map((line) => {
+    const { timestampIso, rest } = extractTimestamp(line);
+    const message = (rest ?? "").trimStart();
+    const tags = deriveRealtimeTags(message);
+    const kind = deriveRealtimeKind(tags, message);
+    const icon = iconForKind(kind);
+    const time = timestampIso ? formatTime(timestampIso) : (line.match(/^(\d{2}:\d{2}:\d{2})/)?.[1] ?? "—");
+
+    return {
+      line,
+      time,
+      message,
+      tags,
+      kind,
+      icon,
+    };
+  });
+}
+
+function renderRealtimeLogFilters() {
+  if (!elements.realtimeLogFilters) return;
+  elements.realtimeLogFilters.innerHTML = realtimeLogFilters
+    .map((filter) => {
+      const active = filter.id === state.realtimeLogFilter;
+      return `
+        <button class="log-chip ${active ? "log-chip--active" : ""}" data-filter="${escapeHtml(filter.id)}" type="button">
+          <span class="log-chip__icon" aria-hidden="true">${escapeHtml(filter.icon)}</span>
+          <span>${escapeHtml(filter.id)}</span>
+        </button>
+      `;
+    })
+    .join("");
+
+  elements.realtimeLogFilters.querySelectorAll("[data-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = button.dataset.filter ?? "全部";
+      state.realtimeLogFilter = next;
+      renderRealtimeLogFilters();
+      renderRealtimeLogs();
+    });
+  });
+}
+
+function isNearBottom(viewport, thresholdPx = 30) {
+  return viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - thresholdPx;
+}
+
+function renderRealtimeLogs() {
+  if (!elements.realtimeLogLines || !elements.realtimeLogViewport) return;
+  const viewport = elements.realtimeLogViewport;
+  const shouldStick = state.realtimeLogAutoScroll || isNearBottom(viewport);
+  const previousScrollTop = viewport.scrollTop;
+
+  const entries = buildRealtimeEntries(state.realtimeLogRawLines);
+  const filtered = state.realtimeLogFilter === "全部"
+    ? entries
+    : entries.filter((entry) => entry.tags.has(state.realtimeLogFilter));
+
+  elements.realtimeLogLines.innerHTML = filtered
+    .map((entry) => {
+      return `
+        <div class="log-line log-line--${escapeHtml(entry.kind)}">
+          <div class="log-line__time">${escapeHtml(entry.time)}</div>
+          <div class="log-line__icon" aria-hidden="true">${escapeHtml(entry.icon)}</div>
+          <div class="log-line__text">${decorateLogText(entry.message || entry.line)}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  if (shouldStick) {
+    viewport.scrollTop = viewport.scrollHeight;
+  } else {
+    viewport.scrollTop = previousScrollTop;
+  }
+
+  if (elements.realtimeLogMeta) {
+    const updatedAt = state.realtimeLogLastUpdateAt
+      ? new Date(state.realtimeLogLastUpdateAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      })
+      : "—";
+    elements.realtimeLogMeta.textContent = `gateway.log · ${entries.length} lines · ${updatedAt}`;
+  }
+}
+
+function mergeLogTail(previous, nextTail, limit = 600) {
+  if (!Array.isArray(nextTail) || nextTail.length === 0) {
+    return previous ?? [];
+  }
+  if (!Array.isArray(previous) || previous.length === 0) {
+    return nextTail.slice(-limit);
+  }
+
+  const searchFrom = Math.max(0, previous.length - 80);
+  let matchIndexInTail = -1;
+  for (let index = previous.length - 1; index >= searchFrom; index -= 1) {
+    const candidate = previous[index];
+    const idx = nextTail.lastIndexOf(candidate);
+    if (idx !== -1) {
+      matchIndexInTail = idx;
+      break;
+    }
+  }
+
+  if (matchIndexInTail === -1) {
+    return nextTail.slice(-limit);
+  }
+
+  const merged = previous.concat(nextTail.slice(matchIndexInTail + 1));
+  return merged.slice(-limit);
+}
+
+async function refreshRealtimeLogs() {
+  const data = await fetchJson("/api/logs?type=gateway&lines=350");
+  state.realtimeLogRawLines = mergeLogTail(state.realtimeLogRawLines, data.lines ?? []);
+  state.realtimeLogLastUpdateAt = Date.now();
+  renderRealtimeLogs();
 }
 
 function setupTabs() {
   elements.tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      elements.tabs.forEach((btn) => btn.classList.remove("tab--active"));
+      elements.tabs.forEach((button) => button.classList.remove("tab--active"));
       elements.panels.forEach((panel) => panel.classList.remove("panel--active"));
       tab.classList.add("tab--active");
-      document.getElementById(tab.dataset.tab).classList.add("panel--active");
+      const panel = document.getElementById(tab.dataset.tab);
+      if (panel) {
+        panel.classList.add("panel--active");
+      }
     });
   });
 }
 
 async function refreshAll() {
-  await Promise.all([refreshSummary(), refreshAgents(), refreshLogs(), refreshConfig()]);
+  if (state.refreshInFlight) {
+    return;
+  }
+  state.refreshInFlight = true;
+  try {
+    await Promise.all([refreshSummary(), refreshAgents(), refreshLogs(), refreshRealtimeLogs(), refreshConfig()]);
+  } finally {
+    state.refreshInFlight = false;
+  }
 }
 
 setupTabs();
-elements.refreshLogs.addEventListener("click", refreshLogs);
+renderRealtimeLogFilters();
+if (elements.realtimeLogViewport) {
+  elements.realtimeLogViewport.addEventListener("scroll", () => {
+    state.realtimeLogAutoScroll = isNearBottom(elements.realtimeLogViewport);
+  });
+}
+if (elements.refreshLogs) {
+  elements.refreshLogs.addEventListener("click", refreshLogs);
+}
 
 refreshAll();
-setInterval(refreshAll, 10000);
+setInterval(refreshAll, 3000);
