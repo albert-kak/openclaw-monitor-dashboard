@@ -8,7 +8,7 @@ const state = {
   configFileReadOnly: false,
   configSaveInFlight: false,
   gatewayRestartInFlight: false,
-  configCodeMirror: null,
+  configMonaco: null,
   configEditorSilent: false,
   configEditorWrap: false,
   configValidationTimer: null,
@@ -48,6 +48,7 @@ const elements = {
   clearLogs: document.getElementById("clear-logs"),
   logAutoScrollButton: document.getElementById("log-autoscroll"),
   refreshLogs: document.getElementById("refresh-logs"),
+  configEditorMonaco: document.getElementById("config-editor-monaco"),
   configEditor: document.getElementById("config-editor"),
   configFilePath: document.getElementById("config-file-path"),
   configFileMeta: document.getElementById("config-file-meta"),
@@ -85,6 +86,9 @@ const statusLabels = {
 const REALTIME_LOG_PREVIEW_CHARS = 220;
 const LOG_STREAM_PREVIEW_CHARS = 320;
 const SCHEDULE_PREVIEW_CHARS = 260;
+const MONACO_VS_BASE_URL = "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs";
+
+let monacoLoadPromise = null;
 
 function formatDate(iso) {
   if (!iso) return "—";
@@ -397,9 +401,11 @@ function evaluateConfigJson(text) {
 
 function refreshConfigCursorStatus() {
   if (!elements.configCursorStatus) return;
-  if (state.configCodeMirror) {
-    const cursor = state.configCodeMirror.getCursor();
-    elements.configCursorStatus.textContent = `Ln ${cursor.line + 1}, Col ${cursor.ch + 1}`;
+  if (state.configMonaco) {
+    const cursor = state.configMonaco.getPosition();
+    const line = cursor?.lineNumber ?? 1;
+    const col = cursor?.column ?? 1;
+    elements.configCursorStatus.textContent = `Ln ${line}, Col ${col}`;
     return;
   }
   const text = getConfigEditorText();
@@ -432,10 +438,27 @@ function renderConfigWrapButton() {
   elements.configWrap.classList.toggle("btn--active", state.configEditorWrap);
 }
 
+function setMonacoEditorVisible(enabled) {
+  if (elements.configEditor) {
+    elements.configEditor.classList.toggle("is-hidden", Boolean(enabled));
+  }
+  if (elements.configEditorMonaco) {
+    elements.configEditorMonaco.classList.toggle("is-active", Boolean(enabled));
+  }
+}
+
+function layoutConfigMonacoEditor() {
+  if (state.configMonaco) {
+    state.configMonaco.layout();
+  }
+}
+
 function setConfigEditorWrap(enabled) {
   state.configEditorWrap = Boolean(enabled);
-  if (state.configCodeMirror) {
-    state.configCodeMirror.setOption("lineWrapping", state.configEditorWrap);
+  if (state.configMonaco) {
+    state.configMonaco.updateOptions({
+      wordWrap: state.configEditorWrap ? "on" : "off",
+    });
   } else if (elements.configEditor) {
     elements.configEditor.style.whiteSpace = state.configEditorWrap ? "pre-wrap" : "pre";
     elements.configEditor.style.overflowX = state.configEditorWrap ? "hidden" : "auto";
@@ -443,95 +466,161 @@ function setConfigEditorWrap(enabled) {
   renderConfigWrapButton();
 }
 
-function setupConfigCodeEditor() {
+function setupConfigTextareaFallback() {
   if (!elements.configEditor) {
     return;
   }
-  const CodeMirror = window.CodeMirror;
-  if (!CodeMirror || typeof CodeMirror.fromTextArea !== "function") {
-    elements.configEditor.addEventListener("input", () => {
-      updateConfigDirtyState();
-      scheduleConfigJsonValidation();
-      refreshConfigCursorStatus();
-    });
-    elements.configEditor.addEventListener("click", refreshConfigCursorStatus);
-    elements.configEditor.addEventListener("keyup", refreshConfigCursorStatus);
-    setConfigEditorWrap(state.configEditorWrap);
-    refreshConfigCursorStatus();
-    refreshConfigJsonValidation();
-    return;
-  }
-
-  const supportsLint = Boolean(CodeMirror.lint && window.jsonlint && typeof window.jsonlint.parse === "function");
-  const cm = CodeMirror.fromTextArea(elements.configEditor, {
-    mode: { name: "javascript", json: true },
-    theme: "material-darker",
-    lineNumbers: true,
-    styleActiveLine: true,
-    matchBrackets: true,
-    autoCloseBrackets: true,
-    tabSize: 2,
-    indentUnit: 2,
-    indentWithTabs: false,
-    lineWrapping: state.configEditorWrap,
-    viewportMargin: 12,
-    lint: supportsLint ? { lintOnChange: true } : false,
-    foldGutter: true,
-    gutters: ["CodeMirror-lint-markers", "CodeMirror-linenumbers", "CodeMirror-foldgutter"],
-    extraKeys: {
-      "Cmd-S": () => saveConfigFile(),
-      "Ctrl-S": () => saveConfigFile(),
-      "Cmd-F": "findPersistent",
-      "Ctrl-F": "findPersistent",
-      "Cmd-G": "findNext",
-      "Ctrl-G": "findNext",
-      "Shift-Cmd-G": "findPrev",
-      "Shift-Ctrl-G": "findPrev",
-      "Cmd-Alt-F": () => formatConfigFile(),
-      "Ctrl-Alt-F": () => formatConfigFile(),
-      "Ctrl-Q": (editor) => editor.foldCode(editor.getCursor()),
-      "Tab": (editor) => editor.execCommand("indentMore"),
-      "Shift-Tab": (editor) => editor.execCommand("indentLess"),
-    },
-  });
-
-  cm.on("change", () => {
+  elements.configEditor.addEventListener("input", () => {
     updateConfigDirtyState();
     scheduleConfigJsonValidation();
     refreshConfigCursorStatus();
   });
-  cm.on("cursorActivity", refreshConfigCursorStatus);
+  elements.configEditor.addEventListener("click", refreshConfigCursorStatus);
+  elements.configEditor.addEventListener("keyup", refreshConfigCursorStatus);
+  setConfigEditorWrap(state.configEditorWrap);
+  refreshConfigCursorStatus();
+  refreshConfigJsonValidation();
+}
+
+function loadMonacoApi() {
+  if (window.monaco?.editor) {
+    return Promise.resolve(window.monaco);
+  }
+  if (monacoLoadPromise) {
+    return monacoLoadPromise;
+  }
+  if (typeof window.require !== "function" || typeof window.require.config !== "function") {
+    return Promise.reject(new Error("Monaco loader unavailable"));
+  }
+
+  window.MonacoEnvironment = {
+    getWorkerUrl() {
+      const bootstrap = [
+        `self.MonacoEnvironment = { baseUrl: "${MONACO_VS_BASE_URL}/" };`,
+        `importScripts("${MONACO_VS_BASE_URL}/base/worker/workerMain.js");`,
+      ].join("\n");
+      return `data:text/javascript;charset=utf-8,${encodeURIComponent(bootstrap)}`;
+    },
+  };
+
+  window.require.config({ paths: { vs: MONACO_VS_BASE_URL } });
+  monacoLoadPromise = new Promise((resolve, reject) => {
+    window.require(
+      ["vs/editor/editor.main"],
+      () => {
+        if (!window.monaco?.editor) {
+          reject(new Error("Monaco initialization failed"));
+          return;
+        }
+        resolve(window.monaco);
+      },
+      (error) => {
+        reject(error instanceof Error ? error : new Error(String(error ?? "Monaco load failed")));
+      },
+    );
+  });
+  return monacoLoadPromise;
+}
+
+function setupMonacoEditor(monaco) {
+  if (!elements.configEditor || !elements.configEditorMonaco || state.configMonaco) {
+    return;
+  }
+  setMonacoEditorVisible(true);
+
+  monaco.languages?.json?.jsonDefaults?.setDiagnosticsOptions?.({
+    validate: true,
+    allowComments: false,
+  });
+
+  const editor = monaco.editor.create(elements.configEditorMonaco, {
+    value: elements.configEditor.value ?? "",
+    language: "json",
+    theme: "vs-dark",
+    lineNumbers: "on",
+    tabSize: 2,
+    insertSpaces: true,
+    detectIndentation: false,
+    readOnly: Boolean(state.configFileReadOnly),
+    scrollBeyondLastLine: false,
+    minimap: { enabled: false },
+    renderWhitespace: "selection",
+    fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 12,
+    lineHeight: 18,
+    wordWrap: state.configEditorWrap ? "on" : "off",
+    automaticLayout: false,
+  });
+
+  editor.onDidChangeModelContent(() => {
+    updateConfigDirtyState();
+    scheduleConfigJsonValidation();
+    refreshConfigCursorStatus();
+  });
+  editor.onDidChangeCursorPosition(refreshConfigCursorStatus);
+
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveConfigFile());
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () => formatConfigFile());
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG, () => {
+    editor.getAction("editor.action.nextMatchFindAction").run();
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyG, () => {
+    editor.getAction("editor.action.previousMatchFindAction").run();
+  });
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyQ, () => {
+    editor.getAction("editor.toggleFold").run();
+  });
+
+  state.configMonaco = editor;
   renderConfigWrapButton();
   refreshConfigCursorStatus();
   refreshConfigJsonValidation();
-  state.configCodeMirror = cm;
+  requestAnimationFrame(() => layoutConfigMonacoEditor());
+}
+
+function setupConfigCodeEditor() {
+  setupConfigTextareaFallback();
+  if (!elements.configEditorMonaco) {
+    return;
+  }
+  setMonacoEditorVisible(false);
+  loadMonacoApi()
+    .then((monaco) => {
+      setupMonacoEditor(monaco);
+    })
+    .catch((error) => {
+      console.warn("Monaco unavailable, fallback to textarea editor:", error);
+      setMonacoEditorVisible(false);
+    });
 }
 
 function getConfigEditorText() {
-  if (state.configCodeMirror) {
-    return state.configCodeMirror.getValue();
+  if (state.configMonaco) {
+    return state.configMonaco.getValue();
   }
   return elements.configEditor?.value ?? "";
 }
 
 function setConfigEditorText(text) {
   const next = text ?? "";
-  if (state.configCodeMirror) {
-    state.configCodeMirror.setValue(next);
+  if (elements.configEditor) {
+    elements.configEditor.value = next;
+  }
+  if (state.configMonaco) {
+    state.configMonaco.setValue(next);
     refreshConfigCursorStatus();
     scheduleConfigJsonValidation(0);
     return;
   }
   if (elements.configEditor) {
-    elements.configEditor.value = next;
     refreshConfigCursorStatus();
     scheduleConfigJsonValidation(0);
   }
 }
 
 function setConfigEditorReadOnly(readOnly) {
-  if (state.configCodeMirror) {
-    state.configCodeMirror.setOption("readOnly", readOnly ? "nocursor" : false);
+  if (state.configMonaco) {
+    state.configMonaco.updateOptions({ readOnly: Boolean(readOnly) });
     return;
   }
   if (elements.configEditor) {
@@ -1465,6 +1554,7 @@ function setupTabs() {
         panel.classList.add("panel--active");
       }
       if (tab.dataset.tab === "config") {
+        requestAnimationFrame(() => layoutConfigMonacoEditor());
         loadConfigFile({ force: false });
       }
     });
@@ -1545,6 +1635,7 @@ if (elements.logViewport) {
   });
 }
 setupConfigCodeEditor();
+window.addEventListener("resize", layoutConfigMonacoEditor);
 if (elements.configReload) {
   elements.configReload.addEventListener("click", reloadConfigFile);
 }
