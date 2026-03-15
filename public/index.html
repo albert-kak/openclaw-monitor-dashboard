@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Monitor Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="orb"></div>
+    <div class="orb orb--secondary"></div>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand__mark">OC</div>
+        <div>
+          <div class="brand__title">OpenClaw Monitor</div>
+          <div class="brand__subtitle">Agent operations at a glance</div>
+        </div>
+      </div>
+      <div class="status-chip">
+        <span class="status-dot status-dot--active" id="gateway-dot"></span>
+        <span id="gateway-text">Gateway</span>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab tab--active" data-tab="overview" role="tab">Overview</button>
+      <button class="tab" data-tab="agents" role="tab">Agents</button>
+      <button class="tab" data-tab="logs" role="tab">Logs</button>
+      <button class="tab" data-tab="config" role="tab">Config</button>
+    </nav>
+
+    <main class="content">
+      <section class="panel panel--active" id="overview" role="tabpanel">
+        <div class="grid stats-grid" id="summary-cards"></div>
+        <section class="module">
+          <div class="module__header">
+            <h2>Agent Status</h2>
+            <div class="module__meta" id="agent-meta"></div>
+          </div>
+          <div class="grid agent-grid" id="agent-status"></div>
+        </section>
+      </section>
+
+      <section class="panel" id="agents" role="tabpanel">
+        <div class="panel__header">
+          <h2>Agent Detail</h2>
+          <p>Bindings, models, and recent activity per agent.</p>
+        </div>
+        <div class="agent-list" id="agent-list"></div>
+      </section>
+
+      <section class="panel" id="logs" role="tabpanel">
+        <div class="panel__header">
+          <h2>Log Stream</h2>
+          <p>Tail of gateway logs from ~/.openclaw/logs.</p>
+        </div>
+        <div class="log-controls">
+          <select id="log-type">
+            <option value="gateway">gateway.log</option>
+            <option value="gatewayError">gateway.err.log</option>
+          </select>
+          <button class="btn" id="refresh-logs">Refresh</button>
+        </div>
+        <pre class="log-box" id="log-box"></pre>
+      </section>
+
+      <section class="panel" id="config" role="tabpanel">
+        <div class="panel__header">
+          <h2>Sanitized Config</h2>
+          <p>Only non-sensitive fields are shown.</p>
+        </div>
+        <pre class="code-box" id="config-box"></pre>
+      </section>
+    </main>
+
+    <footer class="footer">
+      Data source: <span>~/.openclaw</span> · Auto-refresh every 10 seconds
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
