@@ -1328,61 +1328,35 @@ input[type="search"] {
   box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.10);
 }
 
-.CodeMirror {
+.code-editor--fallback.is-hidden {
+  display: none;
+}
+
+.code-editor--monaco {
+  display: none;
   height: 420px;
+  min-height: 420px;
+  padding: 0;
+  overflow: hidden;
+  resize: none;
+}
+
+.code-editor--monaco.is-active {
+  display: block;
+}
+
+.code-editor--monaco .monaco-editor,
+.code-editor--monaco .monaco-editor .overflow-guard {
   border-radius: 18px;
-  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  background: #12110f;
 }
 
-.CodeMirror-foldgutter {
-  width: 0.85em;
+.code-editor--monaco .margin {
+  background: rgba(0, 0, 0, 0.24);
 }
 
-.CodeMirror-foldmarker {
-  color: rgba(125, 211, 252, 0.92);
-  text-shadow: none;
-}
-
-.CodeMirror-lint-marker-error,
-.CodeMirror-lint-marker-warning {
-  transform: scale(0.9);
-  opacity: 0.95;
-}
-
-.CodeMirror-focused {
+.code-editor--monaco.is-active:focus-within {
   border-color: rgba(45, 212, 191, 0.38);
   box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.10);
-}
-
-.CodeMirror-gutters {
-  background: rgba(0, 0, 0, 0.25);
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.CodeMirror-linenumber {
-  color: rgba(248, 243, 237, 0.45);
-}
-
-.CodeMirror-activeline-background {
-  background: rgba(45, 212, 191, 0.06);
-}
-
-.CodeMirror-dialog {
-  background: rgba(10, 14, 28, 0.96);
-  border: 1px solid rgba(168, 181, 223, 0.18);
-  color: var(--ink);
-}
-
-.CodeMirror-dialog input {
-  background: rgba(10, 14, 28, 0.90);
-  border: 1px solid rgba(168, 181, 223, 0.24);
-  color: var(--ink);
-  border-radius: 10px;
-  padding: 6px 10px;
 }
 
 .config-toolbar {
