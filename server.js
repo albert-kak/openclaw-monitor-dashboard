@@ -30,6 +30,8 @@ const LOG_PATHS = {
 const SESSION_LOG_GLOB = RUNTIME_PATHS.sessionLogGlob.path;
 const HOT_RELOAD_CHILD_ENV = "OPENCLAW_DASHBOARD_CHILD";
 const HOT_RELOAD_DISABLED = process.env.OPENCLAW_HOT_RELOAD === "0";
+const OPENCLAW_TMP_LOG_DIR = "/tmp/openclaw";
+const OPENCLAW_TMP_LOG_NAME_PATTERN = /^openclaw-\d{4}-\d{2}-\d{2}\.log$/;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -186,6 +188,35 @@ function fileExists(filePath) {
   } catch (error) {
     return false;
   }
+}
+
+function resolveLatestTmpOpenclawLogPath() {
+  try {
+    const candidates = fs.readdirSync(OPENCLAW_TMP_LOG_DIR)
+      .filter((name) => OPENCLAW_TMP_LOG_NAME_PATTERN.test(name))
+      .map((name) => {
+        const fullPath = path.join(OPENCLAW_TMP_LOG_DIR, name);
+        const stat = safeStat(fullPath);
+        if (!stat?.isFile()) {
+          return null;
+        }
+        return {
+          fullPath,
+          mtimeMs: stat.mtimeMs,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || b.fullPath.localeCompare(a.fullPath));
+
+    if (candidates.length > 0) {
+      return candidates[0].fullPath;
+    }
+  } catch (error) {
+    // fall back to today's expected filename
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  return path.join(OPENCLAW_TMP_LOG_DIR, `openclaw-${today}.log`);
 }
 
 function resolveExecutablePathFromPath(binName) {
@@ -1034,7 +1065,7 @@ function createRequestHandler() {
         });
         return;
       }
-      const pathChoice = type === "gatewayError" ? LOG_PATHS.gatewayError : LOG_PATHS.gateway;
+      const pathChoice = resolveLatestTmpOpenclawLogPath();
       const text = await readTail(pathChoice, 1024 * 1024);
       const tailLines = text
         .split(/\r?\n/)

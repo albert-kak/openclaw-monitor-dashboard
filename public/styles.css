@@ -645,8 +645,42 @@ body::before {
 }
 
 .agent-node__emoji--typing {
-  animation: typingTap 0.45s steps(2, end) infinite;
-  transform-origin: center;
+  animation: none;
+}
+
+.agent-node__typing-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+}
+
+.agent-node__typing-keyboard {
+  font-size: 16px;
+  animation: typingKeyboardPulse 0.9s ease-in-out infinite;
+}
+
+.agent-node__typing-hands {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0;
+  margin-top: -6px;
+}
+
+.agent-node__typing-hand {
+  display: inline-block;
+  font-size: 12px;
+  transform-origin: 50% 15%;
+  animation: typingFingerTap 0.72s ease-in-out infinite;
+}
+
+.agent-node__typing-hand--left {
+  position: relative;
+  left: 2px;
+}
+
+.agent-node__typing-hand--right {
+  animation-delay: 0.36s;
 }
 
 .agent-node__typing-dots {
@@ -657,7 +691,7 @@ body::before {
   letter-spacing: 0.14em;
   color: #7cf3e3;
   text-shadow: 0 0 10px rgba(52, 211, 153, 0.55);
-  animation: typingDots 0.9s steps(3, end) infinite;
+  animation: typingDots 1.3s steps(3, end) infinite;
 }
 
 .agent-node__spark {
@@ -1479,6 +1513,33 @@ input:disabled {
   }
 }
 
+@keyframes typingKeyboardPulse {
+  0% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+@keyframes typingFingerTap {
+  0% {
+    transform: translateY(0) rotate(0deg);
+  }
+  40% {
+    transform: translateY(-3px) rotate(-10deg);
+  }
+  62% {
+    transform: translateY(1px) rotate(6deg);
+  }
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+}
+
 @keyframes typingTap {
   0% {
     transform: translate(0, 0) rotate(0deg);
@@ -1534,6 +1595,8 @@ input:disabled {
 @media (prefers-reduced-motion: reduce) {
   .agent-node__emoji--avatar,
   .agent-node__emoji--state,
+  .agent-node__typing-keyboard,
+  .agent-node__typing-hand,
   .agent-node__typing-dots,
   .agent-node__spark--a,
   .agent-node__spark--b {

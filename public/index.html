@@ -73,14 +73,10 @@
       <section class="panel" id="logs" role="tabpanel">
         <div class="panel__header">
           <h2>日志时间轴</h2>
-          <p>Tail of gateway logs from ~/.openclaw/logs，支持关键字过滤和分级高亮。</p>
+          <p>Tail of gateway logs from /tmp/openclaw，支持关键字过滤和分级高亮。</p>
         </div>
         <div class="log-stream">
           <div class="log-controls">
-            <select id="log-type">
-              <option value="gateway">gateway.log</option>
-              <option value="gatewayError">gateway.err.log</option>
-            </select>
             <input id="log-search" type="search" placeholder="Filter logs..." />
             <div class="log-level-filters" role="group" aria-label="日志级别筛选">
               <button class="btn btn--compact btn--active" id="log-level-all" type="button">All</button>
