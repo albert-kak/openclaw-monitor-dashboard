@@ -18,6 +18,32 @@ To disable hot reload:
 OPENCLAW_HOT_RELOAD=0 node server.js
 ```
 
+## CLI
+
+Use the local CLI `ocd` from repository root:
+
+```bash
+./ocd start
+```
+
+Start in background (daemon mode):
+
+```bash
+./ocd start --daemon
+```
+
+Check service status:
+
+```bash
+./ocd status
+```
+
+Daemon runtime files:
+
+- PID: `~/.openclaw/monitor-dashboard/ocd.pid`
+- stdout log: `~/.openclaw/monitor-dashboard/ocd.log`
+- stderr log: `~/.openclaw/monitor-dashboard/ocd.err.log`
+
 ## Data Sources
 
 - `~/.openclaw/openclaw.json`

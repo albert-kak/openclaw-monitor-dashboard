@@ -1,0 +1,287 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("fs");
+const net = require("net");
+const os = require("os");
+const path = require("path");
+const { spawn } = require("child_process");
+
+const ROOT_DIR = __dirname;
+const SERVER_ENTRY = path.join(ROOT_DIR, "server.js");
+const PORT = 17788;
+const HOST = "127.0.0.1";
+
+const STATE_DIR = path.join(os.homedir(), ".openclaw", "monitor-dashboard");
+const PID_FILE = path.join(STATE_DIR, "ocd.pid");
+const LOG_FILE = path.join(STATE_DIR, "ocd.log");
+const ERR_FILE = path.join(STATE_DIR, "ocd.err.log");
+const STARTUP_WAIT_MS = 800;
+
+function printHelp() {
+  console.log(`OpenClaw Dashboard CLI
+
+Usage:
+  ocd start [-d|--daemon] [--no-hot-reload]
+  ocd status
+
+Commands:
+  start   Start monitor dashboard.
+          -d, --daemon      Run in background.
+          --no-hot-reload   Disable server hot reload in foreground.
+  status  Check whether dashboard service is running.
+`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+async function canConnectPort() {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: HOST, port: PORT });
+    let settled = false;
+
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+
+    socket.setTimeout(450);
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+    socket.once("timeout", () => done(false));
+  });
+}
+
+function readPidState() {
+  try {
+    const raw = fs.readFileSync(PID_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const pid = Number(parsed.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return {
+      pid,
+      startedAt: parsed.startedAt ?? null,
+      port: Number(parsed.port) || PORT,
+      logFile: parsed.logFile ?? LOG_FILE,
+      errFile: parsed.errFile ?? ERR_FILE,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function removePidFile() {
+  try {
+    fs.rmSync(PID_FILE, { force: true });
+  } catch (error) {
+    // ignore
+  }
+}
+
+function ensureStateDir() {
+  fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+}
+
+function writePidState(pid) {
+  const content = {
+    pid,
+    port: PORT,
+    startedAt: new Date().toISOString(),
+    logFile: LOG_FILE,
+    errFile: ERR_FILE,
+  };
+  fs.writeFileSync(PID_FILE, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
+}
+
+function readTailText(filePath, maxBytes = 1200) {
+  try {
+    const stat = fs.statSync(filePath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      return buffer.toString("utf8").trim();
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    return "";
+  }
+}
+
+function parseStartFlags(flags) {
+  const daemon = flags.includes("-d") || flags.includes("--daemon");
+  const disableHotReload = flags.includes("--no-hot-reload");
+  for (const flag of flags) {
+    if (!["-d", "--daemon", "--no-hot-reload"].includes(flag)) {
+      throw new Error(`Unsupported flag: ${flag}`);
+    }
+  }
+  return { daemon, disableHotReload };
+}
+
+function startForeground(disableHotReload) {
+  const env = { ...process.env };
+  if (disableHotReload) {
+    env.OPENCLAW_HOT_RELOAD = "0";
+  }
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    cwd: ROOT_DIR,
+    stdio: "inherit",
+    env,
+  });
+
+  const forwardSignal = (signal) => {
+    if (child.exitCode == null && child.signalCode == null) {
+      child.kill(signal);
+    }
+  };
+  process.on("SIGINT", () => forwardSignal("SIGINT"));
+  process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+
+  child.on("exit", (code) => {
+    process.exit(code ?? 0);
+  });
+}
+
+async function startDaemon() {
+  ensureStateDir();
+  const existing = readPidState();
+  if (existing && processExists(existing.pid)) {
+    console.log(
+      `Dashboard is already running (pid=${existing.pid}). URL: http://localhost:${PORT}`,
+    );
+    return 0;
+  }
+  if (existing) {
+    removePidFile();
+  }
+
+  const outFd = fs.openSync(LOG_FILE, "a");
+  const errFd = fs.openSync(ERR_FILE, "a");
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    cwd: ROOT_DIR,
+    detached: true,
+    stdio: ["ignore", outFd, errFd],
+    env: {
+      ...process.env,
+      OPENCLAW_HOT_RELOAD: "0",
+    },
+  });
+  fs.closeSync(outFd);
+  fs.closeSync(errFd);
+  child.unref();
+
+  writePidState(child.pid);
+  await sleep(STARTUP_WAIT_MS);
+
+  const alive = processExists(child.pid);
+  const portReady = alive ? await canConnectPort() : false;
+  if (!alive) {
+    removePidFile();
+    const errTail = readTailText(ERR_FILE);
+    console.error("Dashboard failed to start.");
+    if (errTail) {
+      console.error(errTail);
+    } else {
+      console.error(`Check logs: ${ERR_FILE}`);
+    }
+    return 1;
+  }
+
+  console.log(`Dashboard started in background (pid=${child.pid}).`);
+  console.log(`URL: http://localhost:${PORT}`);
+  console.log(`Log: ${LOG_FILE}`);
+  if (!portReady) {
+    console.log("Status: process is running, port may still be warming up.");
+  }
+  return 0;
+}
+
+async function showStatus() {
+  const state = readPidState();
+  const portReady = await canConnectPort();
+
+  if (state && processExists(state.pid)) {
+    if (portReady) {
+      console.log(`running (pid=${state.pid})`);
+      console.log(`url: http://localhost:${PORT}`);
+      return 0;
+    }
+    console.log(`running (pid=${state.pid})`);
+    console.log(`warning: port ${PORT} probe failed, service may still be starting.`);
+    return 0;
+  }
+
+  if (state) {
+    removePidFile();
+  }
+
+  if (portReady) {
+    console.log("running (port reachable, not managed by current pid file)");
+    console.log(`url: http://localhost:${PORT}`);
+    return 0;
+  }
+
+  console.log("stopped");
+  return 1;
+}
+
+async function main() {
+  if (!fs.existsSync(SERVER_ENTRY)) {
+    console.error(`server.js not found: ${SERVER_ENTRY}`);
+    process.exit(1);
+  }
+
+  const args = process.argv.slice(2);
+  const command = args[0];
+  const flags = args.slice(1);
+
+  if (!command || command === "help" || command === "-h" || command === "--help") {
+    printHelp();
+    process.exit(0);
+  }
+
+  if (command === "start") {
+    try {
+      const { daemon, disableHotReload } = parseStartFlags(flags);
+      if (daemon) {
+        process.exit(await startDaemon());
+      }
+      startForeground(disableHotReload);
+      return;
+    } catch (error) {
+      console.error(error.message || "Invalid arguments");
+      process.exit(1);
+    }
+  }
+
+  if (command === "status") {
+    process.exit(await showStatus());
+  }
+
+  console.error(`Unknown command: ${command}`);
+  printHelp();
+  process.exit(1);
+}
+
+main().catch((error) => {
+  console.error(error?.message ?? String(error));
+  process.exit(1);
+});
