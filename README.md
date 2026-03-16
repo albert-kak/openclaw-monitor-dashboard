@@ -62,7 +62,17 @@ WorkingDirectory=/opt/openclaw-monitor-dashboard
 ExecStart=/usr/bin/node /opt/openclaw-monitor-dashboard/server.js
 Environment=OPENCLAW_HOME=/data/openclaw
 Environment=OCD_STATE_DIR=/data/openclaw/monitor-dashboard
-Environment=OPENCLAW_INSTALL_DIR=/usr/lib/node_modules/openclaw
+# Set OPENCLAW_INSTALL_DIR to the directory containing openclaw's package.json.
+# Common locations depend on how OpenClaw was installed:
+#   - npm global install:  /usr/local/lib/node_modules/openclaw
+#   - container image (/app layout): /app
+# If omitted, the dashboard auto-discovers via PATH; set explicitly when
+# the openclaw binary is a wrapper script (e.g. exec node /app/dist/index.js).
+Environment=OPENCLAW_INSTALL_DIR=/usr/local/lib/node_modules/openclaw
+# OpenClaw writes rolling daily logs to /tmp/openclaw/openclaw-YYYY-MM-DD.log
+# by default (configurable via logging.file in openclaw.json).
+# Override here if your deployment uses a fixed path:
+# Environment=OPENCLAW_GATEWAY_LOG_PATH=/data/openclaw/logs/gateway.log
 Restart=always
 ```
 
