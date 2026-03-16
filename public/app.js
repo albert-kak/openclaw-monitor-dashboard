@@ -40,7 +40,6 @@ const elements = {
   agentList: document.getElementById("agent-list"),
   logBox: document.getElementById("log-box"),
   logViewport: document.getElementById("log-viewport"),
-  logType: document.getElementById("log-type"),
   logSearch: document.getElementById("log-search"),
   logLevelAll: document.getElementById("log-level-all"),
   logLevelIssues: document.getElementById("log-level-issues"),
@@ -87,6 +86,7 @@ const REALTIME_LOG_PREVIEW_CHARS = 220;
 const LOG_STREAM_PREVIEW_CHARS = 320;
 const SCHEDULE_PREVIEW_CHARS = 260;
 const MONACO_VS_BASE_URL = "/vendor/monaco/vs";
+const TAB_STORAGE_KEY = "ocd.activeTab";
 
 let monacoLoadPromise = null;
 
@@ -119,6 +119,11 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function normalizeText(value) {
+  if (value == null) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
 function formatDurationMs(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "—";
   if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -142,6 +147,21 @@ function resolveStateEmoji(state) {
   if (state === "stale") return "⏳";
   if (state === "offline") return "💤";
   return "❔";
+}
+
+function renderStateEmojiMarkup(state) {
+  if (state === "active") {
+    return `
+      <span class="agent-node__typing-stack">
+        <span class="agent-node__typing-keyboard">⌨️</span>
+        <span class="agent-node__typing-hands">
+          <span class="agent-node__typing-hand agent-node__typing-hand--left">👆</span>
+          <span class="agent-node__typing-hand agent-node__typing-hand--right">👆</span>
+        </span>
+      </span>
+    `;
+  }
+  return resolveStateEmoji(state);
 }
 
 function resolveAgentRole(isRoot) {
@@ -189,7 +209,7 @@ function renderAgentStatus() {
     ? `${rootBinding.channel}:${rootBinding.accountId}`
     : "No binding";
   const rootEmoji = resolveAgentEmoji();
-  const rootStateEmoji = resolveStateEmoji(rootAgent.state);
+  const rootStateEmoji = renderStateEmojiMarkup(rootAgent.state);
   const rootRole = resolveAgentRole(true);
 
   const childMarkup = childAgents
@@ -198,7 +218,7 @@ function renderAgentStatus() {
         ? `${agent.bindings[0].channel}:${agent.bindings[0].accountId}`
         : "No binding";
       const agentEmoji = resolveAgentEmoji();
-      const stateEmoji = resolveStateEmoji(agent.state);
+      const stateEmoji = renderStateEmojiMarkup(agent.state);
       const role = resolveAgentRole(false);
 
       return `
@@ -642,11 +662,10 @@ async function refreshAgents() {
 }
 
 async function refreshLogs() {
-  if (!elements.logType || !elements.logBox) {
+  if (!elements.logBox) {
     return;
   }
-  const type = elements.logType.value;
-  const data = await fetchJson(`/api/logs?type=${type}&lines=200`);
+  const data = await fetchJson("/api/logs?lines=200");
   state.logRawLines = Array.isArray(data?.lines) ? data.lines : [];
   state.logLastUpdateAt = Date.now();
   renderGatewayLogs();
@@ -1279,18 +1298,14 @@ async function refreshSkills() {
 
 const realtimeLogFilters = [
   { id: "全部", icon: "●" },
-  { id: "管理者", icon: "👑" },
-  { id: "全栈", icon: "🧩" },
-  { id: "分析", icon: "🧠" },
+  { id: "User", icon: "🦞" },
   { id: "工具调用", icon: "🛠" },
   { id: "文字输出", icon: "📝" },
   { id: "执行结果", icon: "✅" },
 ];
 
 const realtimeLogIconByTag = {
-  管理者: "👑",
-  全栈: "🧩",
-  分析: "🧠",
+  User: "🦞",
   工具调用: "🛠",
   文字输出: "📝",
   执行结果: "✅",
@@ -1308,6 +1323,10 @@ function extractTimestamp(line) {
       rest,
     };
   }
+  const parsedJsonLog = parseJsonLogLine(line);
+  if (parsedJsonLog) {
+    return parsedJsonLog;
+  }
   const timeMatch = line.match(/^(\d{2}:\d{2}:\d{2})\s+(.*)$/);
   if (timeMatch) {
     return { timestampIso: null, rest: timeMatch[2] ?? "" };
@@ -1315,52 +1334,165 @@ function extractTimestamp(line) {
   return { timestampIso: null, rest: line };
 }
 
-function deriveRealtimeTags(text) {
-  const tags = new Set();
-  const lower = (text ?? "").toLowerCase();
-
-  if (/(system message|\[system\]|\bsystem\b)/i.test(text)) {
-    tags.add("管理者");
+function formatJsonLogValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return formatJsonLogValue(JSON.parse(trimmed));
+      } catch (error) {
+        // keep raw string when it's not valid JSON
+      }
+    }
+    return normalizeText(trimmed);
   }
-  if (/(manager|\[manager\]|管理者)/i.test(text)) {
-    tags.add("管理者");
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatJsonLogValue(item))
+      .filter(Boolean)
+      .join(" ");
   }
-  if (/(full\s*stack|\[fullstack\]|全栈)/i.test(text)) {
-    tags.add("全栈");
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, item]) => {
+        if (item == null) return key;
+        const rendered = formatJsonLogValue(item);
+        if (!rendered) return key;
+        if (Array.isArray(item)) {
+          return `${key}=[${rendered}]`;
+        }
+        if (typeof item === "object") {
+          return `${key}={${rendered}}`;
+        }
+        return `${key}=${rendered}`;
+      })
+      .join(" ");
   }
-  if (/(analysis|\[analysis\]|分析)/i.test(text)) {
-    tags.add("分析");
-  }
-
-  const isToolCall = /\btoolcall\b/i.test(text) || /\b(exec|read|write|spawn|curl|find|grep)\([^)]*\)/i.test(text);
-  const isToolResult = /\btoolresult\b/i.test(text) || /\b(exec|read|write)\s*:/i.test(text) || /\(no output\)/i.test(lower);
-  if (isToolCall) tags.add("工具调用");
-  if (isToolResult) tags.add("执行结果");
-
-  if (!isToolCall && !isToolResult) {
-    tags.add("文字输出");
-  }
-
-  return tags;
+  return String(value);
 }
 
-function deriveRealtimeKind(tags, text) {
-  const lower = (text ?? "").toLowerCase();
-  if (/\b(error|fatal|exception|traceback)\b/i.test(text) || lower.includes("enoent")) {
+function parseJsonLogLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return null;
+  }
+
+  let record;
+  try {
+    record = JSON.parse(trimmed);
+  } catch (error) {
+    return null;
+  }
+
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+
+  const tsRaw = record.time ?? record.timestamp ?? record._meta?.date ?? null;
+  const tsDate = tsRaw ? new Date(tsRaw) : null;
+  const timestampIso = tsDate && !Number.isNaN(tsDate.getTime()) ? tsDate.toISOString() : null;
+
+  const messageParts = Object.keys(record)
+    .filter((key) => /^\d+$/.test(key))
+    .sort((a, b) => Number(a) - Number(b))
+    .map((key) => formatJsonLogValue(record[key]))
+    .filter(Boolean);
+
+  if (!messageParts.length && record.message != null) {
+    messageParts.push(formatJsonLogValue(record.message));
+  }
+  if (!messageParts.length && record.msg != null) {
+    messageParts.push(formatJsonLogValue(record.msg));
+  }
+
+  return {
+    timestampIso,
+    rest: messageParts.join(" · ").trim() || line,
+  };
+}
+
+function parseRealtimeMessageContext(text) {
+  const normalized = String(text ?? "").trimStart();
+  const structuredMatch = normalized.match(/^\[([^\]]+)\]\s+([^:]+):\s*(.*)$/);
+  if (!structuredMatch) {
+    return {
+      raw: normalized,
+      agentId: "",
+      roleRaw: "",
+      roleLower: "",
+      payload: normalized,
+    };
+  }
+  const [, agentRaw, roleRaw, payloadRaw] = structuredMatch;
+  const normalizedRoleRaw = String(roleRaw ?? "").trim();
+  const roleToken = normalizedRoleRaw.split(/\s+/, 1)[0] ?? "";
+  return {
+    raw: normalized,
+    agentId: String(agentRaw ?? "").trim().toLowerCase(),
+    roleRaw: normalizedRoleRaw,
+    roleLower: roleToken.toLowerCase(),
+    payload: String(payloadRaw ?? "").trimStart(),
+  };
+}
+
+function detectRealtimeToolState(sourceText, roleLower = "") {
+  const lower = sourceText.toLowerCase();
+  const isToolCall = roleLower === "toolcall"
+    || (roleLower === "assistant" && /\btoolcall\b/i.test(sourceText))
+    || /\btoolcall\b/i.test(sourceText)
+    || /\b(exec|read|write|spawn|curl|find|grep|web_search|web_fetch|apply_patch)\([^)]*\)/i.test(sourceText);
+  const isToolResult = roleLower === "toolresult"
+    || /\btoolresult\b/i.test(sourceText)
+    || /\b(exec|read|write|spawn|curl|find|grep|web_search|web_fetch|apply_patch)\s*:/i.test(sourceText)
+    || /\(no output\)/i.test(lower);
+  return { isToolCall, isToolResult };
+}
+
+function isRealtimeUserEvent(context = {}) {
+  const role = context.roleLower || "";
+  if (["session", "thinking_level_change", "custom", "user", "model_change"].includes(role)) {
+    return true;
+  }
+  const raw = String(context.raw ?? "");
+  return /\b(session|thinking_level_change|custom|user|model_change)\s*:/.test(raw);
+}
+
+function deriveRealtimeTags(text, context = parseRealtimeMessageContext(text)) {
+  const sourceText = context.payload || context.raw;
+  const { isToolCall, isToolResult } = detectRealtimeToolState(sourceText, context.roleLower);
+  const isUserEvent = isRealtimeUserEvent(context);
+  const primaryTag = isUserEvent
+    ? "User"
+    : (isToolCall
+      ? "工具调用"
+      : (isToolResult ? "执行结果" : "文字输出"));
+
+  return new Set([primaryTag]);
+}
+
+function deriveRealtimeKind(tags, text, context = parseRealtimeMessageContext(text)) {
+  const sourceText = context.payload || context.raw;
+  const lower = sourceText.toLowerCase();
+  const { isToolCall, isToolResult } = detectRealtimeToolState(sourceText, context.roleLower);
+
+  if (/\b(error|fatal|exception|traceback)\b/i.test(sourceText) || lower.includes("enoent")) {
     return "error";
   }
-  if (/\b(warn|warning|deprecated|missing)\b/i.test(text)) {
+  if (/\b(warn|warning|deprecated|missing)\b/i.test(sourceText)) {
     return "warn";
   }
-  if (tags.has("工具调用")) return "tool-call";
-  if (tags.has("执行结果")) return "tool-result";
-  if (tags.has("分析")) return "analysis";
-  if (tags.has("管理者")) return "system";
+  if (isToolCall) return "tool-call";
+  if (isToolResult) return "tool-result";
   return "output";
 }
 
-function iconForTags(tags) {
-  const priority = ["工具调用", "执行结果", "分析", "全栈", "管理者", "文字输出"];
+function iconForTags(tags, preferredTag = "") {
+  if (preferredTag && preferredTag !== "全部" && tags.has(preferredTag)) {
+    return realtimeLogIconByTag[preferredTag] ?? realtimeLogIconByTag.文字输出;
+  }
+  const priority = ["User", "工具调用", "执行结果", "文字输出"];
   for (const tag of priority) {
     if (tags.has(tag)) {
       return realtimeLogIconByTag[tag];
@@ -1399,9 +1531,10 @@ function buildRealtimeEntries(rawLines) {
   return rawLines.map((line) => {
     const { timestampIso, rest } = extractTimestamp(line);
     const message = (rest ?? "").trimStart();
-    const tags = deriveRealtimeTags(message);
-    const kind = deriveRealtimeKind(tags, message);
-    const icon = iconForTags(tags);
+    const context = parseRealtimeMessageContext(message);
+    const tags = deriveRealtimeTags(message, context);
+    const kind = deriveRealtimeKind(tags, message, context);
+    const icon = iconForTags(tags, state.realtimeLogFilter);
     const time = timestampIso ? formatTime(timestampIso) : (line.match(/^(\d{2}:\d{2}:\d{2})/)?.[1] ?? "—");
 
     return {
@@ -1418,6 +1551,10 @@ function buildRealtimeEntries(rawLines) {
 
 function renderRealtimeLogFilters() {
   if (!elements.realtimeLogFilters) return;
+  const filterIds = new Set(realtimeLogFilters.map((item) => item.id));
+  if (!filterIds.has(state.realtimeLogFilter)) {
+    state.realtimeLogFilter = "全部";
+  }
   elements.realtimeLogFilters.innerHTML = realtimeLogFilters
     .map((filter) => {
       const active = filter.id === state.realtimeLogFilter;
@@ -1432,8 +1569,7 @@ function renderRealtimeLogFilters() {
 
   elements.realtimeLogFilters.querySelectorAll("[data-filter]").forEach((button) => {
     button.addEventListener("click", () => {
-      const next = button.dataset.filter ?? "全部";
-      state.realtimeLogFilter = next;
+      state.realtimeLogFilter = button.dataset.filter ?? "全部";
       renderRealtimeLogFilters();
       renderRealtimeLogs();
     });
@@ -1544,21 +1680,71 @@ async function refreshRealtimeLogs() {
 }
 
 function setupTabs() {
+  const tabById = new Map();
+  elements.tabs.forEach((tab) => {
+    if (tab.dataset.tab) {
+      tabById.set(tab.dataset.tab, tab);
+    }
+  });
+
+  const activateTab = (tabId, options = {}) => {
+    const targetTab = tabById.get(tabId);
+    if (!targetTab) return;
+
+    elements.tabs.forEach((button) => button.classList.remove("tab--active"));
+    elements.panels.forEach((panel) => panel.classList.remove("panel--active"));
+
+    targetTab.classList.add("tab--active");
+    const panel = document.getElementById(tabId);
+    if (panel) {
+      panel.classList.add("panel--active");
+    }
+
+    if (options.persist !== false) {
+      try {
+        window.localStorage.setItem(TAB_STORAGE_KEY, tabId);
+      } catch (error) {
+        // ignore storage failures (private mode / disabled storage)
+      }
+    }
+
+    if (options.updateHash !== false) {
+      if (window.location.hash !== `#${tabId}`) {
+        window.history.replaceState(null, "", `#${tabId}`);
+      }
+    }
+
+    if (tabId === "config") {
+      requestAnimationFrame(() => layoutConfigMonacoEditor());
+      loadConfigFile({ force: false });
+    }
+  };
+
   elements.tabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      elements.tabs.forEach((button) => button.classList.remove("tab--active"));
-      elements.panels.forEach((panel) => panel.classList.remove("panel--active"));
-      tab.classList.add("tab--active");
-      const panel = document.getElementById(tab.dataset.tab);
-      if (panel) {
-        panel.classList.add("panel--active");
-      }
-      if (tab.dataset.tab === "config") {
-        requestAnimationFrame(() => layoutConfigMonacoEditor());
-        loadConfigFile({ force: false });
-      }
+      activateTab(tab.dataset.tab);
     });
   });
+
+  const hashTabId = window.location.hash.replace(/^#/, "");
+  let initialTabId = tabById.has(hashTabId) ? hashTabId : "";
+  if (!initialTabId) {
+    try {
+      const stored = window.localStorage.getItem(TAB_STORAGE_KEY) ?? "";
+      if (tabById.has(stored)) {
+        initialTabId = stored;
+      }
+    } catch (error) {
+      // ignore storage failures
+    }
+  }
+  if (!initialTabId) {
+    const activeFromMarkup = Array.from(elements.tabs).find((tab) => tab.classList.contains("tab--active"));
+    initialTabId = activeFromMarkup?.dataset.tab ?? elements.tabs[0]?.dataset.tab ?? "";
+  }
+  if (initialTabId) {
+    activateTab(initialTabId, { persist: false, updateHash: false });
+  }
 }
 
 async function refreshAll() {
@@ -1589,12 +1775,6 @@ if (elements.realtimeLogViewport) {
 }
 if (elements.refreshLogs) {
   elements.refreshLogs.addEventListener("click", refreshLogs);
-}
-if (elements.logType) {
-  elements.logType.addEventListener("change", () => {
-    state.logExpandedKeys.clear();
-    refreshLogs();
-  });
 }
 if (elements.logSearch) {
   elements.logSearch.addEventListener("input", (event) => {
