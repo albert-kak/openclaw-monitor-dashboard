@@ -3,19 +3,24 @@
 
 const fs = require("fs");
 const net = require("net");
-const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
+const {
+  resolveRuntimePaths,
+  validateRuntimeLayout,
+  formatValidationReport,
+} = require("./runtime-paths");
 
 const ROOT_DIR = __dirname;
 const SERVER_ENTRY = path.join(ROOT_DIR, "server.js");
 const PORT = 17788;
 const HOST = "127.0.0.1";
 
-const STATE_DIR = path.join(os.homedir(), ".openclaw", "monitor-dashboard");
-const PID_FILE = path.join(STATE_DIR, "ocd.pid");
-const LOG_FILE = path.join(STATE_DIR, "ocd.log");
-const ERR_FILE = path.join(STATE_DIR, "ocd.err.log");
+const RUNTIME_PATHS = resolveRuntimePaths();
+const STATE_DIR = RUNTIME_PATHS.stateDir.path;
+const PID_FILE = RUNTIME_PATHS.pidFile.path;
+const LOG_FILE = RUNTIME_PATHS.logFile.path;
+const ERR_FILE = RUNTIME_PATHS.errFile.path;
 const STARTUP_WAIT_MS = 800;
 
 function printHelp() {
@@ -260,6 +265,22 @@ async function main() {
 
   if (command === "start") {
     try {
+      const runtimeValidation = validateRuntimeLayout(RUNTIME_PATHS);
+      if (!runtimeValidation.ok) {
+        console.error("[startup] runtime path validation failed.");
+        for (const line of formatValidationReport(runtimeValidation)) {
+          console.error(`[startup] ${line}`);
+        }
+        console.error(
+          "[startup] Set OPENCLAW_HOME or OPENCLAW_* path variables to match your deployment directories.",
+        );
+        process.exit(1);
+      }
+
+      for (const check of runtimeValidation.checks.filter((item) => item.status === "warn")) {
+        console.warn(`[startup] [WARN] ${check.name}: ${check.path} (${check.message})`);
+      }
+
       const { daemon, disableHotReload } = parseStartFlags(flags);
       if (daemon) {
         process.exit(await startDaemon());
