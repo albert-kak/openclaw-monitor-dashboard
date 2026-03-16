@@ -1,21 +1,28 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
 const { fork } = require("child_process");
 const { URL } = require("url");
+const {
+  resolveRuntimePaths,
+  validateRuntimeLayout,
+  formatValidationReport,
+} = require("./runtime-paths");
 
 const PORT = 17788;
 const PUBLIC_DIR = path.join(__dirname, "public");
-const OPENCLAW_DIR = path.join(os.homedir(), ".openclaw");
-const AGENTS_DIR = path.join(OPENCLAW_DIR, "agents");
-const CONFIG_PATH = path.join(OPENCLAW_DIR, "openclaw.json");
-const CRON_JOBS_PATH = path.join(OPENCLAW_DIR, "cron", "jobs.json");
-const OPENCLAW_SKILLS_DIR = path.join(OPENCLAW_DIR, "skills");
+const RUNTIME_PATHS = resolveRuntimePaths();
+const RUNTIME_VALIDATION = validateRuntimeLayout(RUNTIME_PATHS);
+const AGENTS_DIR = RUNTIME_PATHS.agentsDir.path;
+const CONFIG_PATH = RUNTIME_PATHS.configPath.path;
+const CRON_JOBS_PATH = RUNTIME_PATHS.cronJobsPath.path;
+const OPENCLAW_SKILLS_DIR = RUNTIME_PATHS.skillsDir.path;
+const OPENCLAW_INSTALL_DIR_OVERRIDE = RUNTIME_PATHS.openclawInstallDir.path;
 const LOG_PATHS = {
-  gateway: path.join(OPENCLAW_DIR, "logs", "gateway.log"),
-  gatewayError: path.join(OPENCLAW_DIR, "logs", "gateway.err.log"),
+  gateway: RUNTIME_PATHS.gatewayLogPath.path,
+  gatewayError: RUNTIME_PATHS.gatewayErrorLogPath.path,
 };
+const SESSION_LOG_GLOB = RUNTIME_PATHS.sessionLogGlob.path;
 const HOT_RELOAD_CHILD_ENV = "OPENCLAW_DASHBOARD_CHILD";
 const HOT_RELOAD_DISABLED = process.env.OPENCLAW_HOT_RELOAD === "0";
 
@@ -191,6 +198,11 @@ function resolveExecutablePathFromPath(binName) {
 function resolveOpenclawInstallDir() {
   const checked = new Set();
   const candidates = [];
+
+  if (OPENCLAW_INSTALL_DIR_OVERRIDE) {
+    candidates.push(OPENCLAW_INSTALL_DIR_OVERRIDE);
+  }
+
   const executablePath = resolveExecutablePathFromPath("openclaw");
 
   if (executablePath) {
@@ -202,11 +214,11 @@ function resolveOpenclawInstallDir() {
     }
   }
 
-  candidates.push(
-    "/opt/homebrew/lib/node_modules/openclaw",
-    "/usr/local/lib/node_modules/openclaw",
-    path.join(os.homedir(), ".npm-global", "lib", "node_modules", "openclaw"),
-  );
+  const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  for (const entry of pathEntries) {
+    candidates.push(path.resolve(entry, "..", "lib", "node_modules", "openclaw"));
+    candidates.push(path.resolve(entry, "..", "node_modules", "openclaw"));
+  }
 
   for (const rawCandidate of candidates) {
     if (!rawCandidate) continue;
@@ -233,6 +245,17 @@ function resolveOpenclawInstallDir() {
   }
 
   return null;
+}
+
+function serializeRuntimePaths() {
+  return Object.fromEntries(
+    Object.entries(RUNTIME_PATHS).map(([key, value]) => {
+      if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "path")) {
+        return [key, { path: value.path, source: value.source ?? "unknown" }];
+      }
+      return [key, value];
+    }),
+  );
 }
 
 async function readTail(filePath, maxBytes = 512 * 1024) {
@@ -930,6 +953,18 @@ function createRequestHandler() {
 
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);
 
+    if (requestUrl.pathname === "/api/runtime") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
+      sendJson(res, 200, {
+        paths: serializeRuntimePaths(),
+        validation: RUNTIME_VALIDATION,
+      });
+      return;
+    }
+
     if (requestUrl.pathname === "/api/summary") {
       if (req.method !== "GET") {
         sendMethodNotAllowed(res, ["GET"]);
@@ -970,7 +1005,7 @@ function createRequestHandler() {
         const sessionData = await readAgentSessionLogs(config, lines);
         sendJson(res, 200, {
           type,
-          path: "~/.openclaw/agents/*/sessions/*.jsonl",
+          path: SESSION_LOG_GLOB,
           sessionFiles: sessionData.sessionFiles,
           totalLines: sessionData.lines.length,
           lines: sessionData.lines,
@@ -1161,6 +1196,23 @@ function createRequestHandler() {
 }
 
 function startDashboardServer() {
+  if (!RUNTIME_VALIDATION.ok) {
+    console.error("[startup] runtime path validation failed.");
+    for (const line of formatValidationReport(RUNTIME_VALIDATION)) {
+      console.error(`[startup] ${line}`);
+    }
+    console.error(
+      "[startup] Set OPENCLAW_HOME or OPENCLAW_* path variables to match your deployment directories.",
+    );
+    process.exit(1);
+  }
+
+  if (RUNTIME_VALIDATION.hasWarnings) {
+    for (const check of RUNTIME_VALIDATION.checks.filter((item) => item.status === "warn")) {
+      console.warn(`[startup] [WARN] ${check.name}: ${check.path} (${check.message})`);
+    }
+  }
+
   const server = http.createServer(createRequestHandler());
   server.listen(PORT, () => {
     console.log(`OpenClaw monitor dashboard running on http://localhost:${PORT}`);
