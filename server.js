@@ -16,7 +16,7 @@ const {
 
 const PORT = 17788;
 const PUBLIC_DIR = path.join(__dirname, "public");
-const RUNTIME_PATHS = resolveRuntimePaths();
+const RUNTIME_PATHS = resolveRuntimePaths(process.env, { dashboardRootDir: ROOT_DIR });
 const RUNTIME_VALIDATION = validateRuntimeLayout(RUNTIME_PATHS);
 const AGENTS_DIR = RUNTIME_PATHS.agentsDir.path;
 const CONFIG_PATH = RUNTIME_PATHS.configPath.path;

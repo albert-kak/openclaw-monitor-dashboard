@@ -19,7 +19,7 @@ const SERVER_ENTRY = path.join(ROOT_DIR, "server.js");
 const PORT = 17788;
 const HOST = "127.0.0.1";
 
-const RUNTIME_PATHS = resolveRuntimePaths();
+const RUNTIME_PATHS = resolveRuntimePaths(process.env, { dashboardRootDir: ROOT_DIR });
 const STATE_DIR = RUNTIME_PATHS.stateDir.path;
 const PID_FILE = RUNTIME_PATHS.pidFile.path;
 const LOG_FILE = RUNTIME_PATHS.logFile.path;
