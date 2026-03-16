@@ -12,6 +12,8 @@ Open `http://localhost:17788` in your browser.
 
 `server.js` now runs with hot reload by default. Changes in `server.js` and `public/` will auto-restart the server.
 
+The repository root `.env` file is loaded automatically by both `node server.js` and `./ocd`.
+
 To disable hot reload:
 
 ```bash
@@ -20,7 +22,9 @@ OPENCLAW_HOT_RELOAD=0 node server.js
 
 ## Runtime Paths
 
-Path priority is: explicit env var > `OPENCLAW_HOME` derived path > default path.
+Env source priority is: shell env var > repo `.env` > built-in default.
+
+Path priority is: explicit path env var > `OPENCLAW_HOME` derived path > default path.
 
 Core env vars:
 
@@ -31,6 +35,16 @@ Core env vars:
 - `OPENCLAW_CRON_JOBS_PATH` (default: `$OPENCLAW_HOME/cron/jobs.json`)
 - `OPENCLAW_SKILLS_DIR` (default: `$OPENCLAW_HOME/skills`)
 - `OPENCLAW_INSTALL_DIR` (optional, overrides OpenClaw install-dir discovery)
+
+Example `.env`:
+
+```dotenv
+OPENCLAW_HOME=/Users/yourname/.openclaw-dev
+OPENCLAW_CONFIG_PATH=/Users/yourname/.openclaw-dev/openclaw.json
+OPENCLAW_AGENTS_DIR=/Users/yourname/.openclaw-dev/agents
+OPENCLAW_LOGS_DIR=/Users/yourname/.openclaw-dev/logs
+OCD_STATE_DIR=/Users/yourname/.openclaw-dev/monitor-dashboard
+```
 
 CLI daemon runtime env vars:
 

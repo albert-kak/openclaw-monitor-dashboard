@@ -3,6 +3,11 @@ const fs = require("fs");
 const path = require("path");
 const { fork } = require("child_process");
 const { URL } = require("url");
+const { loadEnvFile } = require("./env-file");
+
+const ROOT_DIR = __dirname;
+const ENV_FILE_PATH = path.join(ROOT_DIR, ".env");
+const ENV_FILE_RESULT = loadEnvFile(ENV_FILE_PATH);
 const {
   resolveRuntimePaths,
   validateRuntimeLayout,
@@ -256,6 +261,22 @@ function serializeRuntimePaths() {
       return [key, value];
     }),
   );
+}
+
+function serializeEnvFileLoadResult() {
+  return {
+    path: ENV_FILE_RESULT.filePath,
+    loaded: ENV_FILE_RESULT.loaded,
+    parsedKeys: ENV_FILE_RESULT.parsedKeys,
+    appliedKeys: ENV_FILE_RESULT.appliedKeys,
+    warnings: ENV_FILE_RESULT.warnings,
+  };
+}
+
+function printEnvFileWarnings() {
+  for (const warning of ENV_FILE_RESULT.warnings) {
+    console.warn(`[startup] [WARN] env: ${warning}`);
+  }
 }
 
 async function readTail(filePath, maxBytes = 512 * 1024) {
@@ -959,6 +980,7 @@ function createRequestHandler() {
         return;
       }
       sendJson(res, 200, {
+        envFile: serializeEnvFileLoadResult(),
         paths: serializeRuntimePaths(),
         validation: RUNTIME_VALIDATION,
       });
@@ -1196,6 +1218,8 @@ function createRequestHandler() {
 }
 
 function startDashboardServer() {
+  printEnvFileWarnings();
+
   if (!RUNTIME_VALIDATION.ok) {
     console.error("[startup] runtime path validation failed.");
     for (const line of formatValidationReport(RUNTIME_VALIDATION)) {
@@ -1285,6 +1309,9 @@ function startHotReloadSupervisor() {
 
   const scheduleRestart = createDebouncedRestart(restartWorker, 180);
   const watchTargets = [__filename, PUBLIC_DIR];
+  if (fs.existsSync(ENV_FILE_PATH)) {
+    watchTargets.push(ENV_FILE_PATH);
+  }
 
   for (const target of watchTargets) {
     const watcher = fs.watch(target, (eventType, fileName) => {
