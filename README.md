@@ -12,6 +12,8 @@ Open `http://localhost:17788` in your browser.
 
 `server.js` now runs with hot reload by default. Changes in `server.js` and `public/` will auto-restart the server.
 
+The repository root `.env` file is loaded automatically by both `node server.js` and `./ocd`.
+
 To disable hot reload:
 
 ```bash
@@ -20,7 +22,9 @@ OPENCLAW_HOT_RELOAD=0 node server.js
 
 ## Runtime Paths
 
-Path priority is: explicit env var > `OPENCLAW_HOME` derived path > default path.
+Env source priority is: shell env var > repo `.env` > built-in default.
+
+Path priority is: explicit path env var > `OPENCLAW_HOME` derived path > default path.
 
 Core env vars:
 
@@ -32,12 +36,19 @@ Core env vars:
 - `OPENCLAW_SKILLS_DIR` (default: `$OPENCLAW_HOME/skills`)
 - `OPENCLAW_INSTALL_DIR` (optional, overrides OpenClaw install-dir discovery)
 
+Example `.env`:
+
+```dotenv
+OPENCLAW_HOME=/Users/yourname/.openclaw-dev
+OPENCLAW_CONFIG_PATH=/Users/yourname/.openclaw-dev/openclaw.json
+OPENCLAW_AGENTS_DIR=/Users/yourname/.openclaw-dev/agents
+OPENCLAW_LOGS_DIR=/Users/yourname/.openclaw-dev/logs
+```
+
 CLI daemon runtime env vars:
 
-- `OCD_STATE_DIR` (default: `$OPENCLAW_HOME/monitor-dashboard`)
-- `OCD_PID_FILE` (default: `$OCD_STATE_DIR/ocd.pid`)
-- `OCD_LOG_FILE` (default: `$OCD_STATE_DIR/ocd.log`)
-- `OCD_ERR_FILE` (default: `$OCD_STATE_DIR/ocd.err.log`)
+- `OCD_STATE_DIR` (optional; default: `<repo>/.ocd`)
+- Daemon files are fixed under `$OCD_STATE_DIR`: `ocd.pid`, `ocd.log`, `ocd.err.log`
 
 Optional log-file overrides:
 
@@ -61,7 +72,6 @@ Example service snippet:
 WorkingDirectory=/opt/openclaw-monitor-dashboard
 ExecStart=/usr/bin/node /opt/openclaw-monitor-dashboard/server.js
 Environment=OPENCLAW_HOME=/data/openclaw
-Environment=OCD_STATE_DIR=/data/openclaw/monitor-dashboard
 Environment=OPENCLAW_INSTALL_DIR=/usr/lib/node_modules/openclaw
 Restart=always
 ```
@@ -88,9 +98,9 @@ Check service status:
 
 Daemon runtime files:
 
-- PID: `$OCD_PID_FILE` (default: `~/.openclaw/monitor-dashboard/ocd.pid`)
-- stdout log: `$OCD_LOG_FILE` (default: `~/.openclaw/monitor-dashboard/ocd.log`)
-- stderr log: `$OCD_ERR_FILE` (default: `~/.openclaw/monitor-dashboard/ocd.err.log`)
+- PID: `<repo>/.ocd/ocd.pid` (or `$OCD_STATE_DIR/ocd.pid`)
+- stdout log: `<repo>/.ocd/ocd.log` (or `$OCD_STATE_DIR/ocd.log`)
+- stderr log: `<repo>/.ocd/ocd.err.log` (or `$OCD_STATE_DIR/ocd.err.log`)
 
 ## Data Sources
 

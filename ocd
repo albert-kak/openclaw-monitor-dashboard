@@ -5,23 +5,32 @@ const fs = require("fs");
 const net = require("net");
 const path = require("path");
 const { spawn } = require("child_process");
+const { loadEnvFile } = require("./env-file");
+
+const ROOT_DIR = __dirname;
+const ENV_FILE_RESULT = loadEnvFile(path.join(ROOT_DIR, ".env"));
 const {
   resolveRuntimePaths,
   validateRuntimeLayout,
   formatValidationReport,
 } = require("./runtime-paths");
 
-const ROOT_DIR = __dirname;
 const SERVER_ENTRY = path.join(ROOT_DIR, "server.js");
 const PORT = 17788;
 const HOST = "127.0.0.1";
 
-const RUNTIME_PATHS = resolveRuntimePaths();
+const RUNTIME_PATHS = resolveRuntimePaths(process.env, { dashboardRootDir: ROOT_DIR });
 const STATE_DIR = RUNTIME_PATHS.stateDir.path;
 const PID_FILE = RUNTIME_PATHS.pidFile.path;
 const LOG_FILE = RUNTIME_PATHS.logFile.path;
 const ERR_FILE = RUNTIME_PATHS.errFile.path;
 const STARTUP_WAIT_MS = 800;
+
+function printEnvFileWarnings() {
+  for (const warning of ENV_FILE_RESULT.warnings) {
+    console.warn(`[startup] [WARN] env: ${warning}`);
+  }
+}
 
 function printHelp() {
   console.log(`OpenClaw Dashboard CLI
@@ -265,6 +274,8 @@ async function main() {
 
   if (command === "start") {
     try {
+      printEnvFileWarnings();
+
       const runtimeValidation = validateRuntimeLayout(RUNTIME_PATHS);
       if (!runtimeValidation.ok) {
         console.error("[startup] runtime path validation failed.");

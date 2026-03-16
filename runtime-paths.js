@@ -32,7 +32,10 @@ function resolveOptionalPathFromEnv(env, envName) {
   };
 }
 
-function resolveRuntimePaths(env = process.env) {
+function resolveRuntimePaths(env = process.env, options = {}) {
+  const dashboardRootDir = options?.dashboardRootDir
+    ? path.resolve(options.dashboardRootDir)
+    : process.cwd();
   const openclawHome = resolvePathFromEnv(env, "OPENCLAW_HOME", path.join(os.homedir(), ".openclaw"));
 
   const agentsDir = resolvePathFromEnv(env, "OPENCLAW_AGENTS_DIR", path.join(openclawHome.path, "agents"));
@@ -48,10 +51,19 @@ function resolveRuntimePaths(env = process.env) {
     path.join(logsDir.path, "gateway.err.log"),
   );
 
-  const stateDir = resolvePathFromEnv(env, "OCD_STATE_DIR", path.join(openclawHome.path, "monitor-dashboard"));
-  const pidFile = resolvePathFromEnv(env, "OCD_PID_FILE", path.join(stateDir.path, "ocd.pid"));
-  const logFile = resolvePathFromEnv(env, "OCD_LOG_FILE", path.join(stateDir.path, "ocd.log"));
-  const errFile = resolvePathFromEnv(env, "OCD_ERR_FILE", path.join(stateDir.path, "ocd.err.log"));
+  const stateDir = resolvePathFromEnv(env, "OCD_STATE_DIR", path.join(dashboardRootDir, ".ocd"));
+  const pidFile = {
+    path: path.join(stateDir.path, "ocd.pid"),
+    source: "derived:stateDir",
+  };
+  const logFile = {
+    path: path.join(stateDir.path, "ocd.log"),
+    source: "derived:stateDir",
+  };
+  const errFile = {
+    path: path.join(stateDir.path, "ocd.err.log"),
+    source: "derived:stateDir",
+  };
 
   const openclawInstallDir = resolveOptionalPathFromEnv(env, "OPENCLAW_INSTALL_DIR");
 
