@@ -1,6 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 const { fork } = require("child_process");
 const { URL } = require("url");
 const { loadEnvFile } = require("./env-file");
@@ -605,6 +606,390 @@ async function readAgentSessionLogs(config, maxLines = 350) {
   };
 }
 
+function toFiniteNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatLocalDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatLocalHourKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}:00`;
+}
+
+function parseTrendGranularity(rawValue) {
+  if (rawValue == null || rawValue === "") {
+    return "day";
+  }
+  const normalized = String(rawValue).toLowerCase();
+  if (normalized === "day" || normalized === "hour") {
+    return normalized;
+  }
+  const error = new Error('Invalid "granularity", expected "day" or "hour".');
+  error.statusCode = 400;
+  throw error;
+}
+
+function parseDateFilterRange(fromRaw, toRaw) {
+  const parseOne = (value, name) => {
+    if (!value) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const error = new Error(`Invalid "${name}" date, expected YYYY-MM-DD.`);
+      error.statusCode = 400;
+      throw error;
+    }
+    const date = new Date(`${value}T00:00:00`);
+    if (Number.isNaN(date.getTime())) {
+      const error = new Error(`Invalid "${name}" date, expected YYYY-MM-DD.`);
+      error.statusCode = 400;
+      throw error;
+    }
+    return {
+      raw: value,
+      startMs: date.getTime(),
+    };
+  };
+
+  const from = parseOne(fromRaw, "from");
+  const to = parseOne(toRaw, "to");
+
+  if (from && to && from.startMs > to.startMs) {
+    const error = new Error("\"from\" date must be earlier than or equal to \"to\" date.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let toExclusiveMs = null;
+  if (to) {
+    const nextDate = new Date(to.startMs);
+    nextDate.setDate(nextDate.getDate() + 1);
+    toExclusiveMs = nextDate.getTime();
+  }
+
+  return {
+    from: from?.raw ?? null,
+    to: to?.raw ?? null,
+    fromMs: from?.startMs ?? null,
+    toExclusiveMs,
+  };
+}
+
+function listAllAgentSessionFiles(config) {
+  const files = [];
+  for (const agentId of listAgentIds(config)) {
+    const sessionsDir = path.join(AGENTS_DIR, agentId, "sessions");
+    let entries = [];
+    try {
+      entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+    } catch (error) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+      files.push({
+        agentId,
+        filePath: path.join(sessionsDir, entry.name),
+      });
+    }
+  }
+  return files;
+}
+
+function parseTokenUsageRecord(rawLine, fallbackAgentId) {
+  if (!rawLine) return null;
+
+  let record;
+  try {
+    record = JSON.parse(rawLine);
+  } catch (error) {
+    return null;
+  }
+
+  if (!record || typeof record !== "object" || record.type !== "message") {
+    return null;
+  }
+
+  const message = record.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return null;
+  }
+
+  const usage = message.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    return null;
+  }
+
+  const timestampIso = toIsoTimestamp(record.timestamp ?? message.timestamp ?? null);
+  if (!timestampIso) {
+    return null;
+  }
+  const tsMs = Date.parse(timestampIso);
+  if (Number.isNaN(tsMs)) {
+    return null;
+  }
+
+  const inputTokens = toFiniteNumber(usage.input);
+  const outputTokens = toFiniteNumber(usage.output);
+  const cacheReadTokens = toFiniteNumber(usage.cacheRead);
+  const cacheWriteTokens = toFiniteNumber(usage.cacheWrite);
+  const totalFromUsage = toFiniteNumber(usage.totalTokens);
+  const totalTokens = totalFromUsage > 0
+    ? totalFromUsage
+    : (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens);
+  const costFromUsage = usage.cost;
+  const totalCost = typeof costFromUsage === "number"
+    ? toFiniteNumber(costFromUsage)
+    : toFiniteNumber(costFromUsage?.total);
+
+  const provider = normalizeText(message.provider ?? record.provider ?? "unknown") || "unknown";
+  const model = normalizeText(message.model ?? message.modelId ?? record.model ?? "unknown") || "unknown";
+  const agentId = normalizeText(message.agentId ?? record.agentId ?? fallbackAgentId ?? "unknown") || "unknown";
+
+  return {
+    agentId,
+    provider,
+    model,
+    timestampIso,
+    tsMs,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      totalTokens,
+      totalCost,
+    },
+  };
+}
+
+async function aggregateTokenUsageByModel(config, options = {}) {
+  const dateRange = parseDateFilterRange(options.from ?? null, options.to ?? null);
+  const granularity = parseTrendGranularity(options.granularity ?? null);
+  const sessionFiles = listAllAgentSessionFiles(config);
+  const groups = new Map();
+  const dailyTotals = new Map();
+  const modelDailyTotals = new Map();
+
+  const totals = {
+    calls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    totalCost: 0,
+  };
+
+  let allUsageRecords = 0;
+  let allUsageMinMs = null;
+  let allUsageMaxMs = null;
+  let matchedUsageRecords = 0;
+
+  const updateRange = (tsMs) => {
+    if (allUsageMinMs == null || tsMs < allUsageMinMs) allUsageMinMs = tsMs;
+    if (allUsageMaxMs == null || tsMs > allUsageMaxMs) allUsageMaxMs = tsMs;
+  };
+
+  for (const sessionFile of sessionFiles) {
+    try {
+      const stream = fs.createReadStream(sessionFile.filePath, { encoding: "utf8" });
+      const lineReader = readline.createInterface({
+        input: stream,
+        crlfDelay: Infinity,
+      });
+
+      try {
+        // eslint-disable-next-line no-restricted-syntax
+        for await (const rawLine of lineReader) {
+          const record = parseTokenUsageRecord(rawLine, sessionFile.agentId);
+          if (!record) {
+            continue;
+          }
+
+          allUsageRecords += 1;
+          updateRange(record.tsMs);
+
+          if (dateRange.fromMs != null && record.tsMs < dateRange.fromMs) {
+            continue;
+          }
+          if (dateRange.toExclusiveMs != null && record.tsMs >= dateRange.toExclusiveMs) {
+            continue;
+          }
+          matchedUsageRecords += 1;
+
+          const dayKey = granularity === "hour"
+            ? formatLocalHourKey(record.tsMs)
+            : formatLocalDateKey(record.tsMs);
+          if (dayKey) {
+            const dayTotal = dailyTotals.get(dayKey) ?? {
+              date: dayKey,
+              calls: 0,
+              totalTokens: 0,
+              totalCost: 0,
+            };
+            dayTotal.calls += 1;
+            dayTotal.totalTokens += record.usage.totalTokens;
+            dayTotal.totalCost += record.usage.totalCost;
+            dailyTotals.set(dayKey, dayTotal);
+
+            let modelDayMap = modelDailyTotals.get(record.model);
+            if (!modelDayMap) {
+              modelDayMap = new Map();
+              modelDailyTotals.set(record.model, modelDayMap);
+            }
+            modelDayMap.set(dayKey, (modelDayMap.get(dayKey) ?? 0) + record.usage.totalTokens);
+          }
+
+          const groupKey = record.model;
+          let group = groups.get(groupKey);
+          if (!group) {
+            group = {
+              model: record.model,
+              providers: new Set(),
+              calls: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              totalTokens: 0,
+              totalCost: 0,
+              firstUsedAt: null,
+              lastUsedAt: null,
+            };
+            groups.set(groupKey, group);
+          }
+
+          group.providers.add(record.provider);
+          group.calls += 1;
+          group.inputTokens += record.usage.inputTokens;
+          group.outputTokens += record.usage.outputTokens;
+          group.cacheReadTokens += record.usage.cacheReadTokens;
+          group.cacheWriteTokens += record.usage.cacheWriteTokens;
+          group.totalTokens += record.usage.totalTokens;
+          group.totalCost += record.usage.totalCost;
+
+          if (!group.firstUsedAt || record.tsMs < Date.parse(group.firstUsedAt)) {
+            group.firstUsedAt = record.timestampIso;
+          }
+          if (!group.lastUsedAt || record.tsMs > Date.parse(group.lastUsedAt)) {
+            group.lastUsedAt = record.timestampIso;
+          }
+
+          totals.calls += 1;
+          totals.inputTokens += record.usage.inputTokens;
+          totals.outputTokens += record.usage.outputTokens;
+          totals.cacheReadTokens += record.usage.cacheReadTokens;
+          totals.cacheWriteTokens += record.usage.cacheWriteTokens;
+          totals.totalTokens += record.usage.totalTokens;
+          totals.totalCost += record.usage.totalCost;
+        }
+      } finally {
+        lineReader.close();
+        stream.destroy();
+      }
+    } catch (error) {
+      // Skip corrupted/unreadable session files and continue aggregation.
+      continue;
+    }
+  }
+
+  const models = Array.from(groups.values()).sort((a, b) => {
+    const providerListA = Array.from(a.providers).sort();
+    const providerListB = Array.from(b.providers).sort();
+    const providerLabelA = providerListA.length <= 1
+      ? (providerListA[0] ?? "unknown")
+      : `mixed(${providerListA.length})`;
+    const providerLabelB = providerListB.length <= 1
+      ? (providerListB[0] ?? "unknown")
+      : `mixed(${providerListB.length})`;
+
+    if (b.totalTokens !== a.totalTokens) return b.totalTokens - a.totalTokens;
+    if (b.calls !== a.calls) return b.calls - a.calls;
+    if (providerLabelA !== providerLabelB) return providerLabelA.localeCompare(providerLabelB);
+    return a.model.localeCompare(b.model);
+  }).map((item) => {
+    const providerList = Array.from(item.providers).sort();
+    const providerLabel = providerList.length <= 1
+      ? (providerList[0] ?? "unknown")
+      : `mixed(${providerList.length})`;
+    return {
+      provider: providerLabel,
+      providerList,
+      model: item.model,
+      calls: item.calls,
+      inputTokens: item.inputTokens,
+      outputTokens: item.outputTokens,
+      cacheReadTokens: item.cacheReadTokens,
+      cacheWriteTokens: item.cacheWriteTokens,
+      totalTokens: item.totalTokens,
+      totalCost: item.totalCost,
+      firstUsedAt: item.firstUsedAt,
+      lastUsedAt: item.lastUsedAt,
+    };
+  });
+
+  const daySeries = Array.from(dailyTotals.values()).sort((a, b) => a.date.localeCompare(b.date));
+  const trendByModel = models
+    .map((item) => {
+      const modelDayMap = modelDailyTotals.get(item.model) ?? new Map();
+      return {
+        model: item.model,
+        provider: item.provider,
+        totalTokens: item.totalTokens,
+        calls: item.calls,
+        points: daySeries.map((day) => ({
+          date: day.date,
+          totalTokens: modelDayMap.get(day.date) ?? 0,
+        })),
+      };
+    })
+    .filter((item) => item.totalTokens > 0);
+
+  return {
+    range: {
+      from: dateRange.from,
+      to: dateRange.to,
+      availableFrom: allUsageMinMs == null ? null : formatLocalDateKey(allUsageMinMs),
+      availableTo: allUsageMaxMs == null ? null : formatLocalDateKey(allUsageMaxMs),
+      availableFromTs: allUsageMinMs == null ? null : new Date(allUsageMinMs).toISOString(),
+      availableToTs: allUsageMaxMs == null ? null : new Date(allUsageMaxMs).toISOString(),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
+    },
+    summary: {
+      ...totals,
+      modelCount: models.length,
+      scannedSessionFiles: sessionFiles.length,
+      usageRecords: allUsageRecords,
+      matchedUsageRecords,
+    },
+    trend: {
+      granularity,
+      days: daySeries,
+      byModel: trendByModel,
+    },
+    models,
+  };
+}
+
 function parseLogLines(text) {
   return text
     .split(/\r?\n/)
@@ -1078,6 +1463,25 @@ function createRequestHandler() {
         totalLines: tailLines.length,
         lines: tailLines,
       });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/token-usage") {
+      if (req.method !== "GET") {
+        sendMethodNotAllowed(res, ["GET"]);
+        return;
+      }
+      try {
+        const from = requestUrl.searchParams.get("from");
+        const to = requestUrl.searchParams.get("to");
+        const granularity = requestUrl.searchParams.get("granularity");
+        const config = safeReadJson(CONFIG_PATH);
+        const usage = await aggregateTokenUsageByModel(config, { from, to, granularity });
+        sendJson(res, 200, usage);
+      } catch (error) {
+        const statusCode = Number.isFinite(error?.statusCode) ? error.statusCode : 500;
+        sendJson(res, statusCode, { ok: false, error: error?.message ?? "Failed to load token usage" });
+      }
       return;
     }
 

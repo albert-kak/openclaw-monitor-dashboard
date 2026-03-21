@@ -15,6 +15,13 @@ const state = {
   schedules: [],
   scheduleSummary: null,
   scheduleExpandedKeys: new Set(),
+  tokenUsage: null,
+  tokenUsageError: "",
+  tokenUsageInFlight: false,
+  tokenUsageLastUpdateAt: null,
+  tokenDateFrom: "",
+  tokenDateTo: "",
+  tokenTrendGranularity: "hour",
   skills: [],
   skillSummary: null,
   skillScrollTopBySection: {},
@@ -27,6 +34,7 @@ const state = {
   logLastUpdateAt: null,
   realtimeLogFilter: "全部",
   realtimeLogRawLines: [],
+  realtimeLatestByAgent: new Map(),
   realtimeLogExpandedKeys: new Set(),
   realtimeLogAutoScroll: true,
   realtimeLogLastUpdateAt: null,
@@ -38,6 +46,19 @@ const elements = {
   agentStatus: document.getElementById("agent-status"),
   agentMeta: document.getElementById("agent-meta"),
   agentList: document.getElementById("agent-list"),
+  tokenUsageMeta: document.getElementById("token-usage-meta"),
+  tokenUsageSummary: document.getElementById("token-usage-summary"),
+  tokenUsageTableBody: document.getElementById("token-usage-table-body"),
+  tokenTrendLegend: document.getElementById("token-trend-legend"),
+  tokenTrendChart: document.getElementById("token-trend-chart"),
+  tokenDateFrom: document.getElementById("token-date-from"),
+  tokenDateTo: document.getElementById("token-date-to"),
+  tokenFilterApply: document.getElementById("token-filter-apply"),
+  tokenFilterToday: document.getElementById("token-filter-today"),
+  tokenFilterReset: document.getElementById("token-filter-reset"),
+  tokenRefresh: document.getElementById("token-refresh"),
+  tokenGranularityDay: document.getElementById("token-granularity-day"),
+  tokenGranularityHour: document.getElementById("token-granularity-hour"),
   logBox: document.getElementById("log-box"),
   logViewport: document.getElementById("log-viewport"),
   logSearch: document.getElementById("log-search"),
@@ -83,10 +104,27 @@ const statusLabels = {
 };
 
 const REALTIME_LOG_PREVIEW_CHARS = 220;
+const AGENT_ACTIVITY_PREVIEW_CHARS = 140;
 const LOG_STREAM_PREVIEW_CHARS = 320;
 const SCHEDULE_PREVIEW_CHARS = 260;
 const MONACO_VS_BASE_URL = "/vendor/monaco/vs";
 const TAB_STORAGE_KEY = "ocd.activeTab";
+const INTEGER_FORMATTER = new Intl.NumberFormat();
+const COST_FORMATTER = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 6,
+});
+const COMPACT_INTEGER_FORMATTER = new Intl.NumberFormat(undefined, {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+const TOKEN_TREND_COLORS = [
+  "#22d3ee",
+  "#f97316",
+  "#a3e635",
+  "#f43f5e",
+  "#60a5fa",
+];
 
 let monacoLoadPromise = null;
 
@@ -95,6 +133,16 @@ function formatDate(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
   return date.toLocaleString();
+}
+
+function formatDateInputValue(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function formatTime(iso) {
@@ -133,6 +181,32 @@ function formatDurationMs(ms) {
   return `${minutes}m ${seconds}s`;
 }
 
+function formatInteger(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0";
+  return INTEGER_FORMATTER.format(Math.round(numeric));
+}
+
+function formatCost(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return "$0.0000";
+  }
+  return `$${COST_FORMATTER.format(numeric)}`;
+}
+
+function formatCompactInteger(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "0";
+  return COMPACT_INTEGER_FORMATTER.format(Math.round(numeric));
+}
+
+function compactLabel(value, maxLength = 26) {
+  const text = normalizeText(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
 function statusDotClass(state) {
   return `status-dot status-dot--${state || "unknown"}`;
 }
@@ -166,6 +240,16 @@ function renderStateEmojiMarkup(state) {
 
 function resolveAgentRole(isRoot) {
   return isRoot ? "主控" : "子代理";
+}
+
+function buildAgentRuntimeLine(agent) {
+  if (agent?.state === "active") {
+    const agentKey = normalizeText(agent?.id).toLowerCase();
+    const latest = agentKey ? state.realtimeLatestByAgent.get(agentKey) : "";
+    const text = latest || "实时日志流暂无新动态";
+    return `<div class="agent-node__line">动态: ${escapeHtml(text)}</div>`;
+  }
+  return `<div class="agent-node__line">最近: ${escapeHtml(formatDate(agent?.lastEventAt))}</div>`;
 }
 
 function renderSummary() {
@@ -204,22 +288,16 @@ function renderAgentStatus() {
 
   const rootAgent = state.agents.find((agent) => agent.default) ?? state.agents[0];
   const childAgents = state.agents.filter((agent) => agent.id !== rootAgent.id);
-  const rootBinding = rootAgent.bindings[0];
-  const rootCurrent = rootBinding
-    ? `${rootBinding.channel}:${rootBinding.accountId}`
-    : "No binding";
   const rootEmoji = resolveAgentEmoji();
   const rootStateEmoji = renderStateEmojiMarkup(rootAgent.state);
   const rootRole = resolveAgentRole(true);
 
   const childMarkup = childAgents
     .map((agent) => {
-      const bindingText = agent.bindings.length
-        ? `${agent.bindings[0].channel}:${agent.bindings[0].accountId}`
-        : "No binding";
       const agentEmoji = resolveAgentEmoji();
       const stateEmoji = renderStateEmojiMarkup(agent.state);
       const role = resolveAgentRole(false);
+      const runtimeLine = buildAgentRuntimeLine(agent);
 
       return `
         <article class="agent-node agent-node--child">
@@ -242,9 +320,8 @@ function renderAgentStatus() {
             </div>
             <span class="state-pill state-pill--${agent.state ?? "unknown"}">${statusLabels[agent.state] ?? statusLabels.unknown}</span>
           </div>
-          <div class="agent-node__line agent-node__line--current">当前: ${bindingText}</div>
-          <div class="agent-node__line">模型: ${agent.model}</div>
-          <div class="agent-node__line">最近: ${formatDate(agent.lastEventAt)}</div>
+          <div class="agent-node__line agent-node__line--current">当前模型: ${escapeHtml(normalizeText(agent.model) || "unknown")}</div>
+          ${runtimeLine}
         </article>
       `;
     })
@@ -280,9 +357,8 @@ function renderAgentStatus() {
           </div>
           <span class="state-pill state-pill--${rootAgent.state ?? "unknown"}">${statusLabels[rootAgent.state] ?? statusLabels.unknown}</span>
         </div>
-        <div class="agent-node__line agent-node__line--current">当前: ${rootCurrent}</div>
-        <div class="agent-node__line">工作区: ${rootAgent.workspace}</div>
-        <div class="agent-node__line">模型: ${rootAgent.model}</div>
+        <div class="agent-node__line agent-node__line--current">当前模型: ${escapeHtml(normalizeText(rootAgent.model) || "unknown")}</div>
+        ${buildAgentRuntimeLine(rootAgent)}
       </article>
       <div class="agent-links"></div>
       <div class="agent-children ${childAgents.length <= 1 ? "agent-children--single" : ""}">
@@ -1296,6 +1372,401 @@ async function refreshSkills() {
   renderSkills();
 }
 
+function syncTokenFilterInputs() {
+  if (elements.tokenDateFrom) {
+    elements.tokenDateFrom.value = state.tokenDateFrom;
+  }
+  if (elements.tokenDateTo) {
+    elements.tokenDateTo.value = state.tokenDateTo;
+  }
+}
+
+function buildTokenUsageQuery() {
+  const params = new URLSearchParams();
+  if (state.tokenDateFrom) {
+    params.set("from", state.tokenDateFrom);
+  }
+  if (state.tokenDateTo) {
+    params.set("to", state.tokenDateTo);
+  }
+  params.set("granularity", state.tokenTrendGranularity || "day");
+  return params.toString();
+}
+
+function renderTokenUsageControls() {
+  const disabled = Boolean(state.tokenUsageInFlight);
+  if (elements.tokenDateFrom) elements.tokenDateFrom.disabled = disabled;
+  if (elements.tokenDateTo) elements.tokenDateTo.disabled = disabled;
+  if (elements.tokenFilterApply) elements.tokenFilterApply.disabled = disabled;
+  if (elements.tokenFilterToday) elements.tokenFilterToday.disabled = disabled;
+  if (elements.tokenFilterReset) elements.tokenFilterReset.disabled = disabled;
+  if (elements.tokenRefresh) elements.tokenRefresh.disabled = disabled;
+  if (elements.tokenGranularityDay) elements.tokenGranularityDay.disabled = disabled;
+  if (elements.tokenGranularityHour) elements.tokenGranularityHour.disabled = disabled;
+}
+
+function renderTokenGranularityButtons() {
+  if (elements.tokenGranularityDay) {
+    elements.tokenGranularityDay.classList.toggle("btn--active", state.tokenTrendGranularity === "day");
+  }
+  if (elements.tokenGranularityHour) {
+    elements.tokenGranularityHour.classList.toggle("btn--active", state.tokenTrendGranularity === "hour");
+  }
+}
+
+function renderTokenTrend() {
+  if (!elements.tokenTrendChart || !elements.tokenTrendLegend) {
+    return;
+  }
+
+  const setEmpty = (text) => {
+    elements.tokenTrendLegend.innerHTML = "";
+    elements.tokenTrendChart.innerHTML = `<div class="token-trend__empty">${escapeHtml(text)}</div>`;
+  };
+
+  if (state.tokenUsageError) {
+    setEmpty(`加载失败: ${state.tokenUsageError}`);
+    return;
+  }
+  if (state.tokenUsageInFlight && !state.tokenUsage) {
+    setEmpty("趋势图加载中…");
+    return;
+  }
+
+  const trend = state.tokenUsage?.trend ?? {};
+  const granularity = trend.granularity || state.tokenTrendGranularity || "day";
+  const daySeries = Array.isArray(trend.days) ? trend.days : [];
+  const modelSeries = Array.isArray(trend.byModel) ? trend.byModel : [];
+  if (!daySeries.length) {
+    setEmpty("当前筛选条件下没有可视化数据。");
+    return;
+  }
+
+  const chartSeries = [];
+  chartSeries.push({
+    id: "total",
+    label: "Total",
+    color: TOKEN_TREND_COLORS[0],
+    points: daySeries.map((item) => ({
+      date: item.date,
+      value: Number(item.totalTokens) || 0,
+    })),
+  });
+
+  const topModelSeries = modelSeries
+    .slice()
+    .sort((a, b) => (Number(b.totalTokens) || 0) - (Number(a.totalTokens) || 0))
+    .slice(0, 4);
+
+  topModelSeries.forEach((item, index) => {
+    const points = Array.isArray(item.points) ? item.points : [];
+    const pointByDay = new Map(points.map((point) => [point.date, Number(point.totalTokens) || 0]));
+    chartSeries.push({
+      id: `model-${index}`,
+      label: compactLabel(item.model || "unknown"),
+      color: TOKEN_TREND_COLORS[(index + 1) % TOKEN_TREND_COLORS.length],
+      points: daySeries.map((day) => ({
+        date: day.date,
+        value: pointByDay.get(day.date) ?? 0,
+      })),
+    });
+  });
+
+  elements.tokenTrendLegend.innerHTML = chartSeries
+    .map((series) => `
+      <span class="token-trend__legend-item">
+        <span class="token-trend__legend-dot" style="background:${escapeHtml(series.color)}"></span>
+        <span>${escapeHtml(series.label)}</span>
+      </span>
+    `)
+    .join("");
+
+  const width = Math.max(elements.tokenTrendChart.clientWidth || 0, 360);
+  const height = 260;
+  const padding = { top: 16, right: 12, bottom: 28, left: 52 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+
+  const maxValue = Math.max(
+    1,
+    ...chartSeries.flatMap((series) => series.points.map((point) => point.value)),
+  );
+  const pointCount = daySeries.length;
+
+  const xFor = (index) => {
+    if (pointCount <= 1) {
+      return padding.left + (plotWidth / 2);
+    }
+    return padding.left + ((plotWidth * index) / (pointCount - 1));
+  };
+
+  const yFor = (value) => {
+    const ratio = Math.max(0, Math.min(1, value / maxValue));
+    return padding.top + plotHeight - (plotHeight * ratio);
+  };
+
+  const yTicks = [1, 0.5, 0].map((ratio) => ({
+    ratio,
+    value: Math.round(maxValue * ratio),
+  }));
+  const maxTickCount = 6;
+  const xTickIndexes = [];
+  if (pointCount <= maxTickCount) {
+    for (let index = 0; index < pointCount; index += 1) {
+      xTickIndexes.push(index);
+    }
+  } else {
+    const step = (pointCount - 1) / (maxTickCount - 1);
+    for (let tick = 0; tick < maxTickCount; tick += 1) {
+      xTickIndexes.push(Math.round(step * tick));
+    }
+  }
+  const uniqueXTickIndexes = Array.from(new Set(xTickIndexes));
+  const distinctDateCount = new Set(
+    daySeries
+      .map((item) => String(item.date || "").split(" ", 1)[0])
+      .filter(Boolean),
+  ).size;
+
+  const gridLines = yTicks
+    .map((tick) => {
+      const y = yFor(tick.value);
+      return `<line x1="${padding.left}" y1="${y}" x2="${padding.left + plotWidth}" y2="${y}" class="token-trend__grid-line" />`;
+    })
+    .join("");
+
+  const yLabels = yTicks
+    .map((tick) => {
+      const y = yFor(tick.value);
+      return `<text x="${padding.left - 8}" y="${y + 4}" text-anchor="end" class="token-trend__axis-label">${escapeHtml(formatCompactInteger(tick.value))}</text>`;
+    })
+    .join("");
+
+  const xLabels = uniqueXTickIndexes
+    .map((index) => {
+      const x = xFor(index);
+      const rawLabel = String(daySeries[index]?.date ?? "");
+      let label = rawLabel;
+      if (granularity === "hour") {
+        const [datePart = "", hourPart = ""] = rawLabel.split(" ");
+        if (distinctDateCount <= 1) {
+          label = hourPart || rawLabel;
+        } else {
+          const shortDate = datePart.length >= 10 ? datePart.slice(5) : datePart;
+          label = `${shortDate} ${hourPart}`.trim();
+        }
+      } else if (rawLabel.length >= 10) {
+        label = rawLabel.slice(5);
+      }
+      return `<text x="${x}" y="${height - 6}" text-anchor="middle" class="token-trend__axis-label">${escapeHtml(label)}</text>`;
+    })
+    .join("");
+
+  const seriesPaths = chartSeries
+    .map((series) => {
+      const path = series.points
+        .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(index)} ${yFor(point.value)}`)
+        .join(" ");
+      const lastPoint = series.points[series.points.length - 1];
+      const lastX = xFor(series.points.length - 1);
+      const lastY = yFor(lastPoint?.value ?? 0);
+      return `
+        <path d="${path}" class="token-trend__line" style="stroke:${escapeHtml(series.color)}"></path>
+        <circle cx="${lastX}" cy="${lastY}" r="3" class="token-trend__dot" style="fill:${escapeHtml(series.color)}"></circle>
+      `;
+    })
+    .join("");
+
+  elements.tokenTrendChart.innerHTML = `
+    <svg class="token-trend__svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Token usage trend">
+      ${gridLines}
+      ${seriesPaths}
+      ${yLabels}
+      ${xLabels}
+    </svg>
+  `;
+}
+
+function renderTokenUsage() {
+  if (!elements.tokenUsageSummary || !elements.tokenUsageTableBody) {
+    return;
+  }
+
+  renderTokenUsageControls();
+  renderTokenGranularityButtons();
+  const data = state.tokenUsage;
+  const summary = data?.summary ?? {};
+  const models = Array.isArray(data?.models) ? data.models : [];
+  const activeRange = state.tokenDateFrom || state.tokenDateTo
+    ? `${state.tokenDateFrom || "…"} ~ ${state.tokenDateTo || "…"}`
+    : "全部日期";
+
+  if (elements.tokenUsageMeta) {
+    const updatedAt = state.tokenUsageLastUpdateAt
+      ? new Date(state.tokenUsageLastUpdateAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      })
+      : "—";
+    const availableRange = data?.range?.availableFrom && data?.range?.availableTo
+      ? `${data.range.availableFrom} ~ ${data.range.availableTo}`
+      : "—";
+    const granularity = data?.trend?.granularity || state.tokenTrendGranularity || "day";
+    const granularityLabel = granularity === "hour" ? "Hourly" : "Daily";
+    if (state.tokenUsageError) {
+      elements.tokenUsageMeta.className = "token-usage__meta token-usage__meta--error";
+      elements.tokenUsageMeta.textContent = `加载失败: ${state.tokenUsageError}`;
+    } else if (state.tokenUsageInFlight && !data) {
+      elements.tokenUsageMeta.className = "token-usage__meta";
+      elements.tokenUsageMeta.textContent = "加载中…";
+    } else {
+      elements.tokenUsageMeta.className = "token-usage__meta";
+      elements.tokenUsageMeta.textContent = `过滤: ${activeRange} · 粒度: ${granularityLabel} · 可用范围: ${availableRange} · 更新: ${updatedAt}`;
+    }
+  }
+
+  elements.tokenUsageSummary.innerHTML = [
+    {
+      label: "模型数",
+      value: formatInteger(summary.modelCount ?? models.length),
+      meta: "按 model+provider 分组",
+    },
+    {
+      label: "调用数",
+      value: formatInteger(summary.calls ?? 0),
+      meta: "assistant messages with usage",
+    },
+    {
+      label: "总 Token",
+      value: formatInteger(summary.totalTokens ?? 0),
+      meta: `Input ${formatInteger(summary.inputTokens ?? 0)} · Output ${formatInteger(summary.outputTokens ?? 0)}`,
+    },
+    {
+      label: "总成本",
+      value: formatCost(summary.totalCost ?? 0),
+      meta: `Cache Read ${formatInteger(summary.cacheReadTokens ?? 0)} · Cache Write ${formatInteger(summary.cacheWriteTokens ?? 0)}`,
+    },
+  ]
+    .map((item) => `
+      <article class="card">
+        <div class="card__label">${escapeHtml(item.label)}</div>
+        <div class="card__value">${escapeHtml(item.value)}</div>
+        <div class="card__meta">${escapeHtml(item.meta)}</div>
+      </article>
+    `)
+    .join("");
+
+  renderTokenTrend();
+
+  if (state.tokenUsageError) {
+    elements.tokenUsageTableBody.innerHTML = `
+      <tr>
+        <td colspan="9" class="token-table__empty">加载失败: ${escapeHtml(state.tokenUsageError)}</td>
+      </tr>
+    `;
+    return;
+  }
+
+  if (state.tokenUsageInFlight && !data) {
+    elements.tokenUsageTableBody.innerHTML = `
+      <tr>
+        <td colspan="9" class="token-table__empty">Loading token usage...</td>
+      </tr>
+    `;
+    return;
+  }
+
+  if (!models.length) {
+    elements.tokenUsageTableBody.innerHTML = `
+      <tr>
+        <td colspan="9" class="token-table__empty">当前筛选条件下没有 usage 数据。</td>
+      </tr>
+    `;
+    return;
+  }
+
+  elements.tokenUsageTableBody.innerHTML = models
+    .map((item, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td title="${escapeHtml(item.model)}">${escapeHtml(item.model)}</td>
+        <td>${escapeHtml(item.provider)}</td>
+        <td>${escapeHtml(formatInteger(item.calls))}</td>
+        <td>${escapeHtml(formatInteger(item.inputTokens))}</td>
+        <td>${escapeHtml(formatInteger(item.outputTokens))}</td>
+        <td>${escapeHtml(formatInteger(item.totalTokens))}</td>
+        <td>${escapeHtml(formatCost(item.totalCost))}</td>
+        <td>${escapeHtml(formatDate(item.lastUsedAt))}</td>
+      </tr>
+    `)
+    .join("");
+}
+
+async function refreshTokenUsage() {
+  if (!elements.tokenUsageTableBody) {
+    return;
+  }
+  if (state.tokenUsageInFlight) {
+    return;
+  }
+
+  if (state.tokenDateFrom && state.tokenDateTo && state.tokenDateFrom > state.tokenDateTo) {
+    state.tokenUsageError = "日期范围不合法：开始日期不能晚于结束日期。";
+    renderTokenUsage();
+    return;
+  }
+
+  state.tokenUsageInFlight = true;
+  state.tokenUsageError = "";
+  renderTokenUsage();
+
+  try {
+    const query = buildTokenUsageQuery();
+    const data = await fetchJson(query ? `/api/token-usage?${query}` : "/api/token-usage");
+    state.tokenUsage = data;
+    state.tokenUsageLastUpdateAt = Date.now();
+    state.tokenUsageError = "";
+  } catch (error) {
+    state.tokenUsageError = error?.message ?? "unknown error";
+  } finally {
+    state.tokenUsageInFlight = false;
+    renderTokenUsage();
+  }
+}
+
+function applyTokenDateFilter() {
+  state.tokenDateFrom = elements.tokenDateFrom?.value ?? "";
+  state.tokenDateTo = elements.tokenDateTo?.value ?? "";
+  refreshTokenUsage();
+}
+
+function resetTokenDateFilter() {
+  state.tokenDateFrom = "";
+  state.tokenDateTo = "";
+  syncTokenFilterInputs();
+  refreshTokenUsage();
+}
+
+function applyTodayTokenDateFilter() {
+  const today = formatDateInputValue(new Date());
+  state.tokenDateFrom = today;
+  state.tokenDateTo = today;
+  syncTokenFilterInputs();
+  refreshTokenUsage();
+}
+
+function setTokenTrendGranularity(granularity) {
+  const next = granularity === "hour" ? "hour" : "day";
+  if (state.tokenTrendGranularity === next) {
+    return;
+  }
+  state.tokenTrendGranularity = next;
+  renderTokenGranularityButtons();
+  refreshTokenUsage();
+}
+
 const realtimeLogFilters = [
   { id: "全部", icon: "●" },
   { id: "User", icon: "🦞" },
@@ -1549,6 +2020,36 @@ function buildRealtimeEntries(rawLines) {
   });
 }
 
+function buildLatestRealtimeActivityByAgent(rawLines) {
+  const latestByAgent = new Map();
+  if (!Array.isArray(rawLines) || !rawLines.length) {
+    return latestByAgent;
+  }
+
+  for (let index = rawLines.length - 1; index >= 0; index -= 1) {
+    const rawLine = rawLines[index];
+    const { rest } = extractTimestamp(rawLine);
+    const message = (rest ?? "").trimStart();
+    const context = parseRealtimeMessageContext(message);
+    const agentKey = normalizeText(context.agentId).toLowerCase();
+    if (!agentKey || latestByAgent.has(agentKey)) {
+      continue;
+    }
+    const payload = normalizeText(context.payload || context.raw || message || rawLine);
+    if (!payload) {
+      continue;
+    }
+    const role = normalizeText(context.roleRaw);
+    const activity = normalizeText(role ? `${role}: ${payload}` : payload);
+    if (!activity) {
+      continue;
+    }
+    latestByAgent.set(agentKey, buildLogPreview(activity, AGENT_ACTIVITY_PREVIEW_CHARS).preview);
+  }
+
+  return latestByAgent;
+}
+
 function renderRealtimeLogFilters() {
   if (!elements.realtimeLogFilters) return;
   const filterIds = new Set(realtimeLogFilters.map((item) => item.id));
@@ -1675,8 +2176,10 @@ function mergeLogTail(previous, nextTail, limit = 600) {
 async function refreshRealtimeLogs() {
   const data = await fetchJson("/api/logs?type=session&lines=350");
   state.realtimeLogRawLines = mergeLogTail(state.realtimeLogRawLines, data.lines ?? []);
+  state.realtimeLatestByAgent = buildLatestRealtimeActivityByAgent(state.realtimeLogRawLines);
   state.realtimeLogLastUpdateAt = Date.now();
   renderRealtimeLogs();
+  renderAgentStatus();
 }
 
 function setupTabs() {
@@ -1717,6 +2220,10 @@ function setupTabs() {
     if (tabId === "config") {
       requestAnimationFrame(() => layoutConfigMonacoEditor());
       loadConfigFile({ force: false });
+    } else if (tabId === "tokens") {
+      if (!state.tokenUsage || !state.tokenUsageLastUpdateAt || Date.now() - state.tokenUsageLastUpdateAt > 30000) {
+        refreshTokenUsage();
+      }
     }
   };
 
@@ -1768,10 +2275,30 @@ async function refreshAll() {
 
 setupTabs();
 renderRealtimeLogFilters();
+syncTokenFilterInputs();
+renderTokenUsage();
 if (elements.realtimeLogViewport) {
   elements.realtimeLogViewport.addEventListener("scroll", () => {
     state.realtimeLogAutoScroll = isNearBottom(elements.realtimeLogViewport);
   });
+}
+if (elements.tokenFilterApply) {
+  elements.tokenFilterApply.addEventListener("click", applyTokenDateFilter);
+}
+if (elements.tokenFilterToday) {
+  elements.tokenFilterToday.addEventListener("click", applyTodayTokenDateFilter);
+}
+if (elements.tokenFilterReset) {
+  elements.tokenFilterReset.addEventListener("click", resetTokenDateFilter);
+}
+if (elements.tokenRefresh) {
+  elements.tokenRefresh.addEventListener("click", refreshTokenUsage);
+}
+if (elements.tokenGranularityDay) {
+  elements.tokenGranularityDay.addEventListener("click", () => setTokenTrendGranularity("day"));
+}
+if (elements.tokenGranularityHour) {
+  elements.tokenGranularityHour.addEventListener("click", () => setTokenTrendGranularity("hour"));
 }
 if (elements.refreshLogs) {
   elements.refreshLogs.addEventListener("click", refreshLogs);
@@ -1815,7 +2342,10 @@ if (elements.logViewport) {
   });
 }
 setupConfigCodeEditor();
-window.addEventListener("resize", layoutConfigMonacoEditor);
+window.addEventListener("resize", () => {
+  layoutConfigMonacoEditor();
+  renderTokenTrend();
+});
 if (elements.configReload) {
   elements.configReload.addEventListener("click", reloadConfigFile);
 }
