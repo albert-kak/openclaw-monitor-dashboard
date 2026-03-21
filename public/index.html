@@ -26,6 +26,7 @@
     <nav class="tabs" role="tablist">
       <button class="tab tab--active" data-tab="overview" role="tab">📊 概览</button>
       <button class="tab" data-tab="agents" role="tab">🤖 代理</button>
+      <button class="tab" data-tab="tokens" role="tab">🧮 Token</button>
       <button class="tab" data-tab="schedules" role="tab">⏰ 定时任务</button>
       <button class="tab" data-tab="skills" role="tab">🧩 技能管理</button>
       <button class="tab" data-tab="logs" role="tab">📜 日志</button>
@@ -68,6 +69,60 @@
           <p>Bindings, models, and recent activity per agent.</p>
         </div>
         <div class="agent-list" id="agent-list"></div>
+      </section>
+
+      <section class="panel" id="tokens" role="tabpanel">
+        <div class="panel__header">
+          <h2>Token 用量</h2>
+          <p>按模型聚合统计 token，用于快速看模型消耗与成本。</p>
+        </div>
+        <section class="token-usage" aria-label="Token usage by model">
+          <div class="token-usage__controls">
+            <label class="token-filter-field">
+              <span>开始日期</span>
+              <input id="token-date-from" type="date" />
+            </label>
+            <label class="token-filter-field">
+              <span>结束日期</span>
+              <input id="token-date-to" type="date" />
+            </label>
+            <button class="btn" id="token-filter-apply" type="button">Apply</button>
+            <button class="btn" id="token-filter-today" type="button">Today</button>
+            <button class="btn" id="token-filter-reset" type="button">Reset</button>
+            <button class="btn" id="token-refresh" type="button">Refresh</button>
+            <div class="token-granularity" role="group" aria-label="Trend granularity">
+              <button class="btn btn--compact" id="token-granularity-day" type="button">Daily</button>
+              <button class="btn btn--compact btn--active" id="token-granularity-hour" type="button">Hourly</button>
+            </div>
+          </div>
+          <div class="token-usage__meta" id="token-usage-meta"></div>
+          <div class="grid stats-grid token-usage__summary" id="token-usage-summary"></div>
+          <section class="token-trend" aria-label="Token trend chart">
+            <div class="token-trend__header">
+              <h3>Token 趋势</h3>
+              <div class="token-trend__legend" id="token-trend-legend"></div>
+            </div>
+            <div class="token-trend__chart" id="token-trend-chart"></div>
+          </section>
+          <div class="token-usage__table-wrap">
+            <table class="token-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Model</th>
+                  <th>Provider</th>
+                  <th>Calls</th>
+                  <th>Input</th>
+                  <th>Output</th>
+                  <th>Total</th>
+                  <th>Cost</th>
+                  <th>Last Used</th>
+                </tr>
+              </thead>
+              <tbody id="token-usage-table-body"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
 
       <section class="panel" id="logs" role="tabpanel">
