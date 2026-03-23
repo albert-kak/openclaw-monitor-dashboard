@@ -2,6 +2,16 @@
 
 Local monitoring dashboard for OpenClaw agents. By default the server reads data from `~/.openclaw` and serves a UI on port `17788`.
 
+## Dashboard Preview
+
+### Overview
+
+![Overview](public/overview.jpg)
+
+### Token Usage
+
+![Token Usage](public/token-usage.jpg)
+
 ## Run
 
 ```bash
